@@ -238,24 +238,40 @@ struct Callback {
 async fn callback(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<Callback>,
+    query: Result<Query<Callback>, axum::extract::rejection::QueryRejection>,
 ) -> HttpResult<Response> {
-    let browser = cookie(&headers, LOGIN_COOKIE).ok_or(HttpError(StatusCode::FORBIDDEN))?;
+    let Query(query) = query.map_err(|_| callback_error("query_parse", StatusCode::BAD_REQUEST))?;
+    let browser = cookie(&headers, LOGIN_COOKIE)
+        .ok_or_else(|| callback_error("login_cookie", StatusCode::FORBIDDEN))?;
     let verifier = identity::consume_login(&state.pool, &query.state, browser)
         .await
-        .map_err(|_| HttpError(StatusCode::FORBIDDEN))?;
-    let account = state.github.login(&query.code, &verifier).await?;
+        .map_err(|_| callback_error("login_state", StatusCode::FORBIDDEN))?;
+    let account = state
+        .github
+        .login(&query.code, &verifier)
+        .await
+        .map_err(|error| callback_error(error.stage(), StatusCode::INTERNAL_SERVER_ERROR))?;
     let session = identity::new_session(
         &state.pool,
         account.id,
         &account.login,
         cookie(&headers, SESSION_COOKIE),
     )
-    .await?;
+    .await
+    .map_err(|_| callback_error("session_create", StatusCode::INTERNAL_SERVER_ERROR))?;
     let mut response = Redirect::to("/").into_response();
     set_cookie(&mut response, SESSION_COOKIE, &session, 43200);
     set_cookie(&mut response, LOGIN_COOKIE, "", 0);
     Ok(response)
+}
+
+fn callback_error(stage: &'static str, status: StatusCode) -> HttpError {
+    tracing::warn!(
+        stage,
+        status = status.as_u16(),
+        "GitHub login callback failed"
+    );
+    HttpError(status)
 }
 #[derive(Deserialize)]
 struct CsrfForm {

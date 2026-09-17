@@ -43,6 +43,35 @@ struct InstallationToken {
     expires_at: DateTime<Utc>,
 }
 
+/// Carries only an allowlisted stage, never upstream errors or authentication data.
+#[derive(Debug)]
+pub enum LoginError {
+    TokenRequest,
+    TokenResponse,
+    AccountRequest,
+    AccountResponse,
+    AccountValidation,
+}
+
+impl LoginError {
+    pub fn stage(&self) -> &'static str {
+        match self {
+            Self::TokenRequest => "token_request",
+            Self::TokenResponse => "token_response",
+            Self::AccountRequest => "account_request",
+            Self::AccountResponse => "account_response",
+            Self::AccountValidation => "account_validation",
+        }
+    }
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.stage())
+    }
+}
+impl std::error::Error for LoginError {}
+
 impl GitHub {
     pub async fn from_file(path: &Path) -> Result<Self> {
         let config: AppConfig = serde_json::from_slice(&tokio::fs::read(path).await?)?;
@@ -90,7 +119,7 @@ impl GitHub {
         url.to_string()
     }
 
-    pub async fn login(&self, code: &str, verifier: &str) -> Result<Account> {
+    pub async fn login(&self, code: &str, verifier: &str) -> Result<Account, LoginError> {
         #[derive(Deserialize)]
         struct Token {
             access_token: String,
@@ -107,19 +136,24 @@ impl GitHub {
                 ("redirect_uri", self.config.callback_url.as_str()),
             ])
             .send()
-            .await?;
-        let token: Token = decode(response, 65536).await?;
+            .await
+            .map_err(|_| LoginError::TokenRequest)?;
+        let token: Token = decode(response, 65536)
+            .await
+            .map_err(|_| LoginError::TokenResponse)?;
         let response = self
             .http
             .get("https://api.github.com/user")
             .bearer_auth(&token.access_token)
             .send()
-            .await?;
-        let account: Account = decode(response, 65536).await?;
-        ensure!(
-            account.id > 0 && account.kind == "User",
-            "login is not an individual GitHub account"
-        );
+            .await
+            .map_err(|_| LoginError::AccountRequest)?;
+        let account: Account = decode(response, 65536)
+            .await
+            .map_err(|_| LoginError::AccountResponse)?;
+        if account.id <= 0 || account.kind != "User" {
+            return Err(LoginError::AccountValidation);
+        }
         Ok(account)
     }
 

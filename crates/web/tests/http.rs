@@ -12,7 +12,20 @@ use sha2::Sha256;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
+use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[tokio::test]
 async fn browser_and_worker_boundaries() -> Result<()> {
@@ -40,6 +53,57 @@ async fn browser_and_worker_boundaries() -> Result<()> {
     };
     let app = public_router(state.clone());
     let worker = internal_router(state);
+    let capture = LogCapture::default();
+    let writer = capture.clone();
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    for (query, browser, expected) in [
+        ("code=secret-code", "", StatusCode::BAD_REQUEST),
+        (
+            "code=secret-code&state=secret-state",
+            "",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "code=secret-code&state=secret-state",
+            "secret-browser",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/auth/callback?{query}"))
+                .header(
+                    "cookie",
+                    if browser.is_empty() {
+                        "__Host-grading-session=secret-session".to_owned()
+                    } else {
+                        format!("__Host-grading-login={browser}; __Host-grading-session=secret-session")
+                    },
+                    )
+                    .body(Body::empty())?,
+            )
+            .with_subscriber(subscriber.clone())
+            .await?;
+        assert_eq!(response.status(), expected);
+        let body = to_bytes(response.into_body(), 4096).await?;
+        assert!(!String::from_utf8_lossy(&body).contains("secret-"));
+    }
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone())?;
+    for stage in ["query_parse", "login_cookie", "login_state"] {
+        assert!(logs.contains(stage), "missing callback stage {stage}");
+    }
+    for sensitive in ["secret-", "code=", "state=", "/auth/callback?"] {
+        assert!(!logs.contains(sensitive));
+    }
     let unknown = identity::new_session(&pool, 200, "unknown-account", None).await?;
     let cookie = format!("__Host-grading-session={unknown}");
     let session = identity::session(&pool, &unknown).await?.unwrap();
