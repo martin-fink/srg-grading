@@ -32,22 +32,34 @@ cluster rebuild is needed when exercises change. Register worker capabilities us
 the real CLI under the operator account on Astrid. The cluster supplies connection
 settings, credentials and sandbox limits. No sample image is approved by default.
 
-## Central exercise registration integration
+## Shared runner and central exercise registration
 
-The application now supports `gradingctl exercise add/update/show`; see
-[exercises](exercises.md) for the complete builder, image, scoring and update
-contract. Add one `[registry]` executor policy and register `registered-v1` once.
-Expose registration on a dedicated instructor Nix/Skopeo builder with operator
-credentials. Do not add a Nix socket to public application services. Per-exercise
-profile-file loading is no longer required for centrally registered exercises.
-Apply migrations 0002 and 0003 plus updated database grants, and upgrade
-web/tasks/executor together. Existing student
+Schema version 3 removes image builds from `gradingctl exercise add/update`.
+Build/publish the root flake's `runner-image` separately, then list its immutable
+digest in `registry.runner_images` and pass `--runner-image` when registering an
+exercise. The image contains only runtimes/tools; private grader files must never
+be baked into it. No per-exercise profile file is needed. Schema 1/2 remain supported.
+
+Run registration on Astrid with the operator credential, GitHub App configuration,
+and the application's artifact directory. Registration pins and retains the grader
+snapshot there. Mickey fetches accepted student and grader snapshots over the
+lease-authenticated internal API; it receives no GitHub token. The source gateway
+preserves the existing App credential boundary rather than minting tokens for Jobs.
+
+Apply migrations through 0004 and updated grants; upgrade web/tasks/executor together.
+Include grader artifacts in the existing application-volume backups. Existing student
 Git trees stay pinned; `--existing` changes only subsequent grading runs.
 
-Schema version 2 supports arbitrary grading scripts; see the execution helper and
-resource overhead in [exercises](exercises.md). Controller Pods need their per-lease
-control PVC subpath writable by UID/GID 10004 (the executor's staging identity).
-Student Pods use UID/GID 10003 and cannot mount that channel or private tests.
-Budget one controller alongside the student Job. The instructor-only
-`gradingctl exercise private-grade` schedules additional private grading after
-effective deadlines; neither pushes nor the daily sync schedule private runs.
+Controller Pods and student Jobs use the same runner image in separate environments.
+Only the controller mounts `/grader` read-only and its per-lease control channel
+writable. Private staging/control directories are owned by executor UID/GID 10004,
+mode 0700. Student Jobs use UID/GID 10003 and have neither mount nor credentials.
+Retain gVisor, deny-network policy, bounded logs and restricted Pod-log RBAC. Budget
+the controller overhead specified in [exercises](exercises.md). Existing manifests
+need no new resource kind or Kubernetes permission, but must permit the controller's
+restricted mounts and identity.
+
+`gradingctl exercise private-grade` remains instructor-only and post-deadline.
+Student private reports now show scores/status only; detailed findings are available
+to current administrators. Private test inputs seen by a student program cannot be
+made inherently secret, so never publish its private-run output to students.

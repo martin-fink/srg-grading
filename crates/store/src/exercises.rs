@@ -25,8 +25,8 @@ async fn insert(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("missing grader"))?
         .revision;
-    sqlx::query("INSERT INTO assignment_revisions(digest,assignment_id,config_revision,definition,opens_at,deadline,max_points) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-        .bind(&digest).bind(id).bind(git).bind(serde_json::to_value(revision)?).bind(revision.assignment.opens_at).bind(revision.assignment.deadline).bind(revision.assignment.max_points).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO assignment_revisions(digest,assignment_id,config_revision,definition,opens_at,deadline,max_points,grader_source_digest) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING")
+        .bind(&digest).bind(id).bind(git).bind(serde_json::to_value(revision)?).bind(revision.assignment.opens_at).bind(revision.assignment.deadline).bind(revision.assignment.max_points).bind(revision.grader.as_ref().and_then(|g|g.source_digest.as_deref())).execute(&mut **tx).await?;
     Ok(digest)
 }
 

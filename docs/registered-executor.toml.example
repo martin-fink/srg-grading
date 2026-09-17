@@ -10,6 +10,8 @@ staging_root = "/var/lib/grading-executor"
 # One registry policy for all centrally registered exercises.
 [registry]
 image_prefix = "registry.example.invalid/grading"
+# Explicitly reviewed shared runner digests; never bake course files into these.
+runner_images = ["registry.example.invalid/grading/runner@sha256:REPLACE_WITH_64_HEX_DIGEST"]
 timeout_seconds = 86400
 
 [registry.resources]

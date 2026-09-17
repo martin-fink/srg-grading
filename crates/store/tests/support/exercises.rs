@@ -48,6 +48,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         assignment,
         tests: super::toml_suite()?,
         grader: Some(Grader {
+            source_digest: None,
             workflow: None,
             tests: vec![grading_core::protocol::PrivateTest {
                 id: "private-one".into(),
@@ -191,11 +192,39 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         public_command: vec!["/bin/public".into()],
         private_command: Some(vec!["/bin/private".into()]),
     });
+    let grader_snapshot = grading_core::integrity::Snapshot {
+        sha: third.grader.as_ref().unwrap().revision.clone(),
+        files: BTreeMap::from([(
+            "private/cases.json".into(),
+            grading_core::integrity::Blob {
+                mode: "100644".into(),
+                data: "cHJpdmF0ZS10ZXN0LW1hcmtlcg==".into(),
+            },
+        )]),
+    };
+    let grader_digest = artifacts
+        .put(&operator, "source", &serde_json::to_vec(&grader_snapshot)?)
+        .await?;
+    third.grader.as_mut().unwrap().source_digest = Some(grader_digest.clone());
+    third.grader.as_mut().unwrap().image = third.assignment.image.clone();
     exercises::publish(
         &operator,
         publication(&third, Some(&second_hash), true, false),
     )
     .await?;
+    let retained: String =
+        sqlx::query_scalar("SELECT grader_source_digest FROM assignment_revisions WHERE digest=$1")
+            .bind(third.digest()?)
+            .fetch_one(&owner)
+            .await?;
+    assert_eq!(retained, grader_digest);
+    assert!(
+        sqlx::query("DELETE FROM artifacts WHERE digest=$1")
+            .bind(&grader_digest)
+            .execute(&owner)
+            .await
+            .is_err()
+    );
     let regrade = grading::enqueue_run(&web, submission, true).await?;
     let old_pin: String =
         sqlx::query_scalar("SELECT revision_digest FROM grading_runs WHERE id=$1")
@@ -321,7 +350,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             schema_version: 1,
             points: baseline.points / 2,
             invalidated: false,
-            reason: "Additional tests failed; halved public score".into(),
+            reason: "private-input-marker: additional tests failed; halved public score".into(),
         }),
     };
     grading::accept(&web, &artifacts, &worker, lease.task_id, &result).await?;

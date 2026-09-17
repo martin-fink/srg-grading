@@ -1,4 +1,4 @@
-//! Fetch, build, and atomically publish instructor-owned exercise revisions.
+//! Pin source snapshots and publish exercises; legacy schemas retain image builds.
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
@@ -17,7 +17,7 @@ use tokio::process::Command;
 
 #[derive(Subcommand)]
 pub enum ExerciseCommand {
-    /// Build and register a new exercise from pinned GitHub sources.
+    /// Register a new exercise from pinned GitHub sources.
     Add(Register),
     /// Run private grading on final submissions after their effective deadlines.
     PrivateGrade {
@@ -66,7 +66,10 @@ pub struct Register {
     #[arg(long)]
     pub dry_run: bool,
     #[arg(long, env = "GRADING_BUILD_CONFIG")]
-    pub build_config: PathBuf,
+    pub build_config: Option<PathBuf>,
+    /// Prebuilt shared runner, pinned by digest; retained on update if omitted.
+    #[arg(long, env = "GRADING_RUNNER_IMAGE")]
+    pub runner_image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -128,6 +131,7 @@ pub async fn register(
     args: &Register,
     update: bool,
     operator: &str,
+    artifact_dir: &Path,
 ) -> Result<()> {
     ensure!(
         identifier(&args.course) && identifier(&args.name),
@@ -192,15 +196,22 @@ pub async fn register(
     grader_source.validate()?;
     let definition: Definition = toml::from_str(&text_file(&grader_source, "exercise.toml")?)?;
     ensure!(
-        matches!(definition.schema_version, 1 | 2),
+        matches!(definition.schema_version, 1..=3),
         "unsupported exercise schema"
     );
-    text_file(&grader_source, "flake.nix")?;
-    text_file(&grader_source, "flake.lock")?;
-    let scripted = definition.schema_version == 2;
+    let shared = definition.schema_version == 3;
+    if !shared {
+        text_file(&grader_source, "flake.nix")?;
+        text_file(&grader_source, "flake.lock")?;
+        ensure!(
+            args.runner_image.is_none(),
+            "--runner-image requires exercise schema 3"
+        );
+    }
+    let scripted = definition.schema_version >= 2;
     ensure!(
         scripted == definition.workflow.is_some(),
-        "schema 2 requires a workflow; schema 1 uses fixed cases"
+        "schemas 2 and 3 require a workflow; schema 1 uses fixed cases"
     );
     let private_tests = if let Some(path) = &definition.private_tests {
         if scripted {
@@ -239,17 +250,45 @@ pub async fn register(
         .deadline
         .or(previous.as_ref().map(|r| r.assignment.deadline))
         .context("--deadline is required")?;
-    let config: BuildConfig =
-        toml::from_str(&tokio::fs::read_to_string(&args.build_config).await?)?;
-    let prefix = config.registry_prefix.trim_end_matches('/');
-    ensure!(
-        prefix.contains('/')
-            && prefix
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"./:_-".contains(&b))
-            && !prefix.contains('@'),
-        "invalid registry prefix"
-    );
+    let config: Option<BuildConfig> = if shared {
+        None
+    } else {
+        Some(toml::from_str(
+            &tokio::fs::read_to_string(
+                args.build_config
+                    .as_ref()
+                    .context("legacy exercise requires --build-config")?,
+            )
+            .await?,
+        )?)
+    };
+    let prefix = config
+        .as_ref()
+        .map(|c| c.registry_prefix.trim_end_matches('/'))
+        .unwrap_or("");
+    if !shared {
+        ensure!(
+            prefix.contains('/')
+                && prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"./:_-".contains(&b))
+                && !prefix.contains('@'),
+            "invalid registry prefix"
+        );
+    }
+    let runner = if shared {
+        Some(
+            args.runner_image
+                .as_deref()
+                .or(old_grader
+                    .filter(|g| g.source_digest.is_some())
+                    .map(|g| g.image.as_str()))
+                .context("--runner-image is required for the first shared-runner registration")?,
+        )
+    } else {
+        None
+    };
+    let grader_bytes = serde_json::to_vec(&grader_source)?;
     let mut revision = Revision {
         course_id: args.course.clone(),
         assignment_id: args.name.clone(),
@@ -262,7 +301,9 @@ pub async fn register(
             branch: definition.branch,
             template,
             template_revision: template_sha.clone(),
-            image: format!("{prefix}/student@sha256:{}", "0".repeat(64)),
+            image: runner
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{prefix}/student@sha256:{}", "0".repeat(64))),
             integrity_manifest: "integrity.toml".into(),
             public_tests: definition.public_tests,
             execution_profile: "registered-v1".into(),
@@ -275,11 +316,14 @@ pub async fn register(
             },
         },
         grader: Some(Grader {
+            source_digest: shared.then(|| grading_core::security::digest(&grader_bytes)),
             workflow: definition.workflow,
             tests: private_tests,
             repository: grader,
             revision: grader_sha.clone(),
-            image: format!("{prefix}/grader@sha256:{}", "0".repeat(64)),
+            image: runner
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{prefix}/grader@sha256:{}", "0".repeat(64))),
         }),
     };
     revision.validate()?;
@@ -293,6 +337,34 @@ pub async fn register(
         );
         return Ok(());
     }
+    if shared {
+        let artifacts = grading_store::artifacts::Artifacts::new(artifact_dir).await?;
+        artifacts.put(pool, "source", &grader_bytes).await?;
+        let expected = previous.as_ref().map(Revision::digest).transpose()?;
+        exercises::publish(
+            pool,
+            Publication {
+                revision: &revision,
+                expected: expected.as_deref(),
+                existing: args.existing,
+                dry_run: false,
+                operator,
+                reason: &args.reason,
+            },
+        )
+        .await?;
+        println!(
+            "Published {}/{} revision {} using shared runner {}; no images built",
+            args.course,
+            args.name,
+            revision.digest()?,
+            revision.assignment.image
+        );
+        return Ok(());
+    }
+    let config = config
+        .as_ref()
+        .context("missing legacy builder configuration")?;
     tokio::fs::create_dir_all(&config.work_dir).await?;
     let root = config.work_dir.join(uuid::Uuid::new_v4().to_string());
     tokio::fs::create_dir(&root).await?;
@@ -318,7 +390,7 @@ pub async fn register(
     let source = tokio::fs::canonicalize(source).await?;
     let tag = uuid::Uuid::new_v4().simple().to_string();
     revision.assignment.image = build_image(
-        &config,
+        config,
         &source,
         &root,
         "studentImage",
@@ -330,7 +402,7 @@ pub async fn register(
     )
     .await?;
     revision.grader.as_mut().unwrap().image = build_image(
-        &config,
+        config,
         &source,
         &root,
         "graderImage",
@@ -482,5 +554,45 @@ mod tests {
         assert!(options.existing);
         assert_eq!(options.grader_ref.as_deref(), Some("main"));
         assert!(options.template_ref.is_none());
+    }
+
+    #[test]
+    fn shared_runner_registration_needs_no_builder_configuration() {
+        let definition: Definition = toml::from_str(include_str!(
+            "../../../examples/shared-grader/exercise.toml"
+        ))
+        .unwrap();
+        assert_eq!(definition.schema_version, 3);
+        assert_eq!(
+            definition.workflow.unwrap().public_command,
+            ["/bin/python3", "/grader/public.py"]
+        );
+        let image = format!("registry.example/grading/runner@sha256:{}", "a".repeat(64));
+        let parsed = crate::Args::try_parse_from([
+            "gradingctl",
+            "exercise",
+            "add",
+            "--course",
+            "systems",
+            "--name",
+            "echo",
+            "--template",
+            "org/template",
+            "--grader",
+            "org/private",
+            "--runner-image",
+            &image,
+            "--reason",
+            "Initial registration",
+            "--dry-run",
+        ])
+        .unwrap();
+        let crate::Command::Exercise {
+            command: ExerciseCommand::Add(options),
+        } = parsed.command
+        else {
+            panic!("wrong command");
+        };
+        assert_eq!(options.runner_image.as_deref(), Some(image.as_str()));
     }
 }

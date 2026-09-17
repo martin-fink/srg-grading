@@ -18,6 +18,23 @@ let
   };
 in
 {
+  runner-image = pkgs.dockerTools.buildLayeredImage {
+    name = "grading-runner";
+    tag = "prototype";
+    contents = [
+      pkgs.bash
+      pkgs.coreutils
+      pkgs.python3
+      pkgs.gcc
+    ];
+    config = {
+      User = "10003:10003";
+      Env = [
+        "PATH=/bin"
+        "PYTHONDONTWRITEBYTECODE=1"
+      ];
+    };
+  };
   web-image = pkgs.dockerTools.buildLayeredImage {
     name = "grading-web";
     tag = "prototype";

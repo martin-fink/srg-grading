@@ -7,19 +7,18 @@ configures one approved registry namespace and resource/time caps. Existing lega
 
 ## Instructor workflow
 
-Run registration on a dedicated trusted Linux Nix builder with `nix`, `skopeo`,
-access to the approved registry, the operator DB credential and GitHub App config.
-Do not run builds inside the public web service or a student Pod. Install the updated `gradingctl` binary on that builder; loading an executor
-profile file does not register a central exercise.
+Run registration using the operator CLI on the host with the application's artifact
+volume (currently Astrid). Schema version 3 does not build or push images. Set the
+operator DB and GitHub App configuration as described in [operations](operations.md).
+Use `--artifact-dir` if the shared application artifact volume is not at the default
+`/var/lib/grading/artifacts`. Registration must write the same volume the web service
+reads and backs up.
 
-Create a private builder configuration using [build.toml.example](build.toml.example).
-Keep registry auth in its separate runtime file. Set:
-
-```sh
-export GRADING_DATABASE_URL_FILE=/run/secrets/operator-url
-export GRADING_GITHUB_CONFIG=/run/secrets/github.json
-export GRADING_BUILD_CONFIG=/run/secrets/build.toml
-```
+Build/publish the reusable `runner-image` once separately, and approve its immutable
+digest in the executor's `registry.runner_images`. The example runtime contains
+Python, GCC, Bash and coreutils. Extend `nix/images.nix` and publish a new runner digest
+when exercises require additional dependencies. No dependencies are fetched inside
+grading Pods. Changing scripts/tests needs no image build or executor profile edit.
 
 Import the course first with `gradingctl course apply course.toml`. A course can
 now start with no assignments, just schema_version and its `[course]` table.
@@ -27,6 +26,7 @@ Keep course configuration committed to its private Git repository as before.
 
 ```sh
 gradingctl exercise add --course systems-2026 --name echo \
+  --runner-image REGISTRY/grading/runner@sha256:FULL_DIGEST \
   --template https://github.com/COURSE/echo-template \
   --grader https://github.com/COURSE/echo-grader \
   --template-ref main --grader-ref main \
@@ -35,20 +35,20 @@ gradingctl exercise add --course systems-2026 --name echo \
   --reason 'Initial exercise' --dry-run
 ```
 
-Remove `--dry-run` to build, push images and publish the definition atomically.
-Dry run resolves/fetches sources and validates configuration, but does not test a
-build, push images or change the DB. Both public and private repositories use the
+Remove `--dry-run` to retain the grader snapshot and publish the definition atomically.
+Dry run fetches sources and validates configuration without retaining artifacts or
+changing the DB. `--runner-image` is required on first schema-3 registration and is
+retained on updates if omitted. Both public and private repositories use the
 configured GitHub App; give it read access to the private grader repository.
 Refs may be simple branch names or full lowercase commit SHAs. Omitted refs on
 add default to `main`. URLs must be GitHub HTTPS URLs or `owner/repository`.
 
-Registration records exact source commits and registry image digests. Build and
-publication failures do not activate a half-built revision. A concurrent update
-causes publication to fail rather than overwrite a newer revision; rerun against
-the new current revision. Uploaded but unpublished images may remain in the
-registry. Build source/logs remain in the private work directory for diagnosis;
-apply storage quotas and retention there. Retain image digests used by historical
-runs so those runs can be reproduced.
+Registration records exact source commits, the retained grader snapshot digest and
+the runner image digest. Snapshot/publication failures do not activate partial
+revisions. Concurrent updates fail rather than overwrite newer revisions. Uploaded
+but unpublished snapshots may remain; storage quotas and retention apply. Keep all
+runner digests used by historical runs for reproducibility. Accepted student source
+snapshots are also retained, so later force pushes do not destroy captured sources.
 
 Inspect the current pinned definition:
 
@@ -84,14 +84,14 @@ existing even if GitHub creation has not finished yet.
 
 Without `--existing`, both template and grader updates apply only to future
 repositories. With `--existing`, existing repositories use the new workflow,
-student/grader images and grading limits for subsequently queued runs, but keep
+grader snapshot, runner image and grading limits for subsequently queued runs, but keep
 original template integrity checks. Previously queued/running jobs keep their
 original grading revision. Existing scores are never silently rewritten.
 
 If public tests change, update their public template file, then register that
 commit. Existing repositories retain their original protected public files. If a new
-grader needs revised test data for those repositories, bundle that data in the
-grader image and publish the revised public rubric to students explicitly.
+grader needs revised test data for those repositories, include that data in the
+grader repository and publish the revised public rubric to students explicitly.
 Private checks are not the source of base scoring points. To recompute a prior
 submission with the newly selected grader, use the existing audited command:
 
@@ -103,12 +103,11 @@ This creates another run. Historical run definitions, source SHAs and results re
 
 ## Script-based grader repository contract
 
-Use [the scripted grader](../examples/scripted-grader/) and
-[student template](../examples/scripted-template/) as a starting point. Commit the
-grader's `flake.lock`. Its `exercise.toml` contains:
+Use [the shared-runner grader](../examples/shared-grader/) and
+[student template](../examples/scripted-template/) as a starting point. Its `exercise.toml` contains:
 
 ```toml
-schema_version = 2
+schema_version = 3
 title = "C echo exercise"
 branch = "main"
 public_tests = "tests"
@@ -123,8 +122,8 @@ memory_gib = 1
 storage_gib = 1
 
 [workflow]
-public_command = ["/bin/grade-public"]
-private_command = ["/bin/grade-private"]
+public_command = ["/bin/python3", "/grader/public.py"]
+private_command = ["/bin/python3", "/grader/private.py"]
 ```
 
 `public_tests` names a file or directory in the template; `private_tests` names a
@@ -135,24 +134,31 @@ deadline come from registration. All template files outside `editable` are prote
 by the platform's automatically generated integrity manifest. The executor checks
 this before running scripts. Private grader files never enter student repositories.
 
-The flake supplies `packages.SYSTEM.studentImage` and `packages.SYSTEM.graderImage`
-as Nix `dockerTools` image archives. The builder uses locked, pure flake evaluation,
-refuses lock-file updates, disables flake-supplied configuration, and requests
-sandboxed builds. Enforce sandboxing in the builder's daemon policy. Do not embed
-credentials in sources or images. Private sources are fetched before building;
-protect stores/caches containing private graders. Build for the worker architecture.
+The grader repository no longer needs `flake.nix` or image outputs. Its scripts are
+mounted read-only at `/grader` in a trusted controller Pod. The controller and
+student Jobs use the same approved runner digest, but only the controller receives
+the private repository. The image supplies `/bin/sh`, `cp`, `/bin/python3` (needed
+by the execution helper), and whatever compilers/runtimes the exercise requires.
+The grading scripts can use any language available in that image.
 
-The student image contains `/bin/sh`, `cp`, and the exercise's compiler/runtime/tools.
-It must not contain private tests, expected answers, or solutions. The grader image
-contains the instructor's scripts and private tests, and `/bin/python3` for the
-platform's execution helper. Grading scripts themselves can use any language.
-Dependencies are built into the images; grading Pods have no network access.
+The runner image must contain **no course tests, solutions, credentials or private
+Nix closures**. Student code can inspect all image files. The operator explicitly
+approves shared-runner digests in addition to the registry-prefix policy.
+
+The App-authenticated service fetches exact commits and retains immutable snapshots.
+Mickey downloads those through the authenticated, lease-scoped source API, verifies
+their digests and commits, and stages them before starting Pods. No GitHub token is
+issued to Mickey or a grading Pod, placed in a URL/environment, or persisted in a
+Git checkout. This deliberately preserves the existing credential boundary; there
+is no token inside the runner that must be erased after fetching. The executor's
+internal-API and Kubernetes credentials remain outside all grading Pods too.
 
 ## Running custom code and returning points
 
 The trusted grading script runs in its own Pod with:
 
 - `/submission`: the immutable student source, read-only.
+- `/grader`: the pinned grader repository, read-only; also the controller working directory.
 - `/grading/input.json`: phase, maximum points, submission SHA, and (for private
   grading) the original `public_points` and `public_run_id`, read-only.
 - `/platform/grading-run`: the platform's helper for isolated student execution.
@@ -166,7 +172,7 @@ student code, use the helper, for example:
   /bin/sh -c '/bin/cc src/main.c -o /workspace/program && /workspace/program'
 ```
 
-This starts a fresh sandbox using the pinned **student image**, with a writable
+This starts a fresh sandbox using the pinned **shared runner image**, with a writable
 copy of source in `/workspace`. It returns JSON with `exit_code`, `stdout` and
 `truncated`. The script inspects this response and determines points itself. Each
 call has a fresh workspace: combine compilation and execution in one command when
@@ -191,11 +197,13 @@ On success, the script exits zero and writes only a final JSON object to stdout:
 Diagnostics belong on stderr. Integer points must be in `0..max_points`. Only the
 trusted script's output is accepted as a score; student stdout is just data returned
 to that script. A failed script or malformed result is an infrastructure failure.
-Reasons are student-visible, so exclude private test data from them.
+Public grading reasons are student-visible. Private run reports expose only scores
+and status to students; detailed reasons remain available to instructors. Scripts
+must not use private inputs during public grading or echo sensitive data there.
 
 The public script runs for normal submissions and should implement exactly the
 public rubric. The platform does not prescribe a test format or calculate scores
-from a fixed list of stdin/stdout cases for schema version 2.
+from a fixed list of stdin/stdout cases for schema versions 2 and 3.
 
 ## Additional private grading after the deadline
 
@@ -237,6 +245,11 @@ The example uses JSON public tests and a custom Python controller to compile C i
 isolated Pods; the private script checks additional inputs and halves the public
 score if they fail. These are example choices, not platform requirements.
 
+Schema version 2 ([example](../examples/scripted-grader/)) retains the old
+`studentImage`/`graderImage` build contract and needs a trusted Nix/Skopeo builder
+with [build.toml.example](build.toml.example). Its images are built per exercise
+revision, never per student submission. New exercises should use schema version 3.
+
 Schema version 1 and legacy local profiles remain supported for existing courses.
 They use the older fixed stdin/stdout suite and adjustment checker, illustrated in
 [the legacy example](../examples/grader/). Their private checks now also require
@@ -245,32 +258,36 @@ manual post-deadline scheduling.
 ## Cluster integration change
 
 Configure the executor once using [registered-executor.toml.example](registered-executor.toml.example).
-The `[registry]` section replaces per-exercise allowlists for `registered-v1`.
-Register the worker with `--profile registered-v1` (retain additional legacy
-profiles if needed). Match builder `registry_prefix` to executor `image_prefix`.
-Only trusted instructors/builders may publish into that registry namespace; use
-registry permissions and node-side image pull credentials. The prefix policy
-is not image signing or a substitute for registry write authorization.
+Register the worker with `--profile registered-v1`. Match the runner repository to
+the registry prefix and list its exact digest in `runner_images`. An empty allowlist
+disables shared runners; historical schema-1/2 registry behavior remains supported.
+Only trusted operators should publish/review reusable runtime images.
 
-Apply migrations 0002 and 0003 and the updated database grants using the owner role before starting the new binaries. Stop
-old web/task/executor processes during this upgrade: old binaries do not populate
-the new grading revision column. Existing rows are backfilled to their old revision;
-legacy serialized definitions retain their digests. Run history is preserved.
+Build the example runtime with `nix build .#runner-image`; publishing it to your
+registry is a separate deployment step. No course sources are included. Its contents
+are a baseline for the C/Python example, not a claim of LLVM/FPGA/SimBricks support.
 
-The cluster installs native application binaries from the root flake. Provision
-the registration command on the separate trusted builder using that application
-package, Nix and Skopeo. Do not add a host Nix socket or cluster administrator
-credentials to the public services.
+Apply migrations through 0004 and updated grants using the owner role. Upgrade
+web/tasks/executor together before registering schema 3. Migration 0004 adds a
+foreign-key reference from immutable revisions to their retained grader artifacts;
+back up those artifacts with accepted student snapshots and reports.
 
-Validate one real build/push/pull, private repository fetch, private checker Pod,
-score adjustment/invalidation and update/regrade cycle in the test organization
-before using this with students. Unit/integration fixtures do not establish those
-external properties.
+The controller uses UID/GID 10004 and needs a writable per-lease `control` subpath
+on the staging PVC. The executor must own this directory and the private grader
+staging directory as UID 10004. The grader directory has mode 0700 and is mounted
+read-only only in the controller. Student Pods remain UID/GID 10003 with only
+source/input subpaths and their own ephemeral workspace. Both use the restricted
+runtime and a deny-network policy. Budget additional controller requests (100m CPU,
+128 MiB) and limits (1 CPU, 512 MiB memory, 1 GiB ephemeral storage) alongside
+student resources. Restrict cluster Pod-log access to operators.
 
-Scripted workflows run a trusted controller Pod alongside student Jobs. The controller
-uses UID/GID 10004 and needs a writable per-lease `control` subpath on the staging
-PVC; student Pods remain UID/GID 10003 without that mount. The executor must own
-that directory as UID 10004. Both use the restricted runtime and network policy.
-Allow additional controller requests (100m CPU, 128 MiB) and limits (1 CPU, 512 MiB
-memory, 1 GiB ephemeral storage) in namespace quotas alongside student resources.
-Upgrade binaries together before publishing schema version 2 exercises.
+Student programs necessarily observe the private inputs they are given. The platform
+cannot promise information-theoretic secrecy: final scores/timing are also observable.
+It isolates private files/answers, prevents direct network/file exfiltration under
+the enforced sandbox policy, withholds private stdout/stderr from student reports,
+and never gives students control-channel or grader mounts. Instructor controllers
+are trusted; they must never execute student code directly in their own Pod.
+
+Validate actual gVisor mounts, network denial, image pulls, snapshot staging and the
+public/private grading cycle in the cluster before using this with students. Local
+unit/integration tests and image builds do not establish those external properties.

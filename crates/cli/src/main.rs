@@ -239,6 +239,7 @@ async fn main() -> Result<()> {
                         options,
                         matches!(command, exercises::ExerciseCommand::Update(_)),
                         &operator(),
+                        &args.artifact_dir,
                     )
                     .await?;
                 }

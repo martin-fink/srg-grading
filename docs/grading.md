@@ -108,14 +108,18 @@ pins template and grader commits, student/grader image digests, script commands 
 resource caps. The executor independently checks the configured registry namespace
 and resource limits. Integrity verification precedes all script/student execution.
 
-Schema version 2 runs an instructor-owned controller with arbitrary test logic.
+Schema versions 2 and 3 run an instructor-owned controller with arbitrary test logic.
+Version 3 uses a shared runner image and stages the pinned grader snapshot through
+the lease-scoped API; only the controller mounts that source. No GitHub credentials
+reach the executor or grading Pods.
 It requests isolated student Jobs through a private per-lease file channel. Only
 the trusted controller's final bounded score is accepted; student outputs are data.
 The public script runs normally. A private script runs only when explicitly queued
 by `gradingctl exercise private-grade` after the effective deadline, using the final
 submission and a pinned completed public result. Extensions delay eligibility.
 
-Private runs can change points or invalidate a score, with a student-visible reason.
+Private runs can change points or invalidate a score. Detailed reasons remain
+instructor-only; student private reports expose scores and status.
 Public baselines and run history remain immutable. Runtime web credentials cannot
 schedule private runs. Template updates affect future repositories; `--existing`
 rolls a grader revision into subsequent runs without changing existing student files.

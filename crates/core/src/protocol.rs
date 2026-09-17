@@ -46,6 +46,12 @@ impl Revision {
         self.assignment.validate()?;
         if let Some(grader) = &self.grader {
             grader.validate()?;
+            if grader.source_digest.is_some() {
+                ensure!(
+                    grader.image == self.assignment.image,
+                    "shared runner images must match"
+                );
+            }
             ensure!(
                 self.assignment.execution_profile == "registered-v1",
                 "registered grader requires registered-v1"
@@ -329,13 +335,15 @@ impl RunResult {
     }
 }
 
-/// Immutable provenance for an instructor-built private checker.
+/// Immutable provenance for instructor grading code and its runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grader {
     pub repository: String,
     pub revision: String,
     pub image: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<PrivateTest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -352,6 +360,12 @@ impl Grader {
             "grader must use a commit SHA"
         );
         crate::config::validate_image(&self.image)?;
+        if let Some(digest) = &self.source_digest {
+            ensure!(
+                crate::security::valid_hex(digest, 64) && self.workflow.is_some(),
+                "invalid grader snapshot reference"
+            );
+        }
         if let Some(workflow) = &self.workflow {
             workflow.validate()?;
             ensure!(

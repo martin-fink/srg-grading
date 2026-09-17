@@ -123,19 +123,21 @@ override; neither timestamps nor existing event records are rewritten.
 
 ## Register and update exercises
 
-Instructors can now register template and private grader repositories centrally
-with `gradingctl exercise add`, then advance their pinned hashes with
-`gradingctl exercise update`. A locked Nix flake builds separate student and
-grader images. One executor registry policy replaces per-exercise profile edits.
-Schema version 2 supports arbitrary instructor scripts and public test formats.
-Private scripts run only after the effective deadline, manually queued with
-`gradingctl exercise private-grade`. They receive the original public points and
-can adjust or invalidate them. Student code runs in separate sandboxes.
+Instructors register template and private grader repositories with
+`gradingctl exercise add`, then advance pinned hashes with `exercise update`.
+Schema version 3 uses a prebuilt shared runner image and mounts the pinned grader
+snapshot only in the trusted controller. Registration builds no images; adding
+exercises needs no per-exercise cluster profile. The root flake provides a baseline
+`runner-image` with Python/GCC/Bash, built and published separately.
 
-See [the exercise workflow](docs/exercises.md) for commands, the grader contract,
-build configuration, and cluster integration. Template updates affect future
-repositories only. `--existing` explicitly rolls a new grader out to future runs
-for existing repositories; earlier runs remain unchanged, and regrading is explicit.
+Public grading scripts define the score. Private scripts run only after the effective
+deadline, manually queued with `gradingctl exercise private-grade`, and receive the
+original public points. Student code runs in separate sandboxes without private test
+files or credentials. Private reports expose only scores/status to students.
+
+See [the exercise workflow](docs/exercises.md) and [shared-runner example](examples/shared-grader/).
+Template updates affect future repositories only. `--existing` rolls the new grader
+into subsequent runs for existing repositories, preserving historical runs.
 
 ## Instructor configuration
 

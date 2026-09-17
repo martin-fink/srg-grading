@@ -101,6 +101,7 @@ pub fn internal_router(state: AppState) -> Router {
         .route("/internal/lease", post(lease))
         .route("/internal/tasks/{id}/heartbeat", post(heartbeat))
         .route("/internal/tasks/{id}/source", get(source))
+        .route("/internal/tasks/{id}/grader", get(grader_source))
         .route("/internal/tasks/{id}/result", post(result))
         .route("/internal/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
@@ -452,10 +453,19 @@ async fn report(
     Path(id): Path<Uuid>,
 ) -> HttpResult<Response> {
     let session = authenticated(&state, &headers).await?;
-    let hash:Option<String>=sqlx::query_scalar("SELECT g.report_digest FROM grading_runs g JOIN submissions s ON s.id=g.submission_id JOIN student_repositories r ON r.id=s.repository_id JOIN enrollments e ON e.id=r.enrollment_id WHERE g.id=$1 AND (e.github_id=$2 OR EXISTS(SELECT 1 FROM admins WHERE github_id=$2))")
+    let (hash,private,status,points,public_points,sha):(Option<String>,bool,String,Option<i32>,Option<i32>,String)=sqlx::query_as("SELECT g.report_digest,g.public_run_id IS NOT NULL,g.status,g.points,g.public_points,s.sha FROM grading_runs g JOIN submissions s ON s.id=g.submission_id JOIN student_repositories r ON r.id=s.repository_id JOIN enrollments e ON e.id=r.enrollment_id WHERE g.id=$1 AND (e.github_id=$2 OR EXISTS(SELECT 1 FROM admins WHERE github_id=$2))")
         .bind(id).bind(session.github_id).fetch_one(&state.pool).await?;
     let hash = hash.ok_or(HttpError(StatusCode::NOT_FOUND))?;
-    let bytes = state.artifacts.get(&hash).await?;
+    let bytes = if private && !session.admin {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version":1, "run_id":id, "sha":sha, "phase":"private",
+            "status":status, "points":points, "public_points":public_points,
+            "feedback":"Detailed private grading findings are available to instructors."
+        }))
+        .map_err(anyhow::Error::from)?
+    } else {
+        state.artifacts.get(&hash).await?
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
@@ -543,6 +553,28 @@ async fn source(
     Ok((
         [(header::CONTENT_TYPE, "application/json")],
         state.artifacts.get(&lease.source_digest).await?,
+    )
+        .into_response())
+}
+async fn grader_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SourceQuery>,
+) -> HttpResult<Response> {
+    let worker = worker(&state, &headers).await?;
+    let lease = grading::owned_lease(&state.pool, &worker, id, query.lease_token, false)
+        .await
+        .map_err(|_| HttpError(StatusCode::NOT_FOUND))?;
+    let digest = lease
+        .revision
+        .grader
+        .as_ref()
+        .and_then(|g| g.source_digest.as_deref())
+        .ok_or(HttpError(StatusCode::NOT_FOUND))?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        state.artifacts.get(digest).await?,
     )
         .into_response())
 }

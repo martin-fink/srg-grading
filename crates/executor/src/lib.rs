@@ -38,6 +38,8 @@ pub struct Profile {
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     pub image_prefix: String,
+    #[serde(default)]
+    pub runner_images: Vec<String>,
     pub resources: Resources,
     pub timeout_seconds: u32,
 }
@@ -97,6 +99,12 @@ impl Config {
                 assignment.image.starts_with(&prefix) && grader.image.starts_with(&prefix),
                 "image outside approved registry namespace"
             );
+            if grader.source_digest.is_some() {
+                ensure!(
+                    registry.runner_images.contains(&assignment.image),
+                    "shared runner digest is not approved"
+                );
+            }
             ensure!(
                 assignment.resources.fits(&registry.resources)
                     && assignment.timeout_seconds <= registry.timeout_seconds,
@@ -254,6 +262,17 @@ pub fn controller_job(config: &Config, lease: &Lease, remaining: u32) -> Result<
         {"name":"source","mountPath":"/control","subPath":format!("runs/{id}/control")},
         {"name":"tmp","mountPath":"/tmp"}
     ]);
+    if lease
+        .revision
+        .grader
+        .as_ref()
+        .is_some_and(|g| g.source_digest.is_some())
+    {
+        container["volumeMounts"].as_array_mut().unwrap().push(json!({
+            "name":"source", "mountPath":"/grader", "subPath":format!("runs/{id}/grader"), "readOnly":true
+        }));
+        container["workingDir"] = json!("/grader");
+    }
     Ok(serde_json::from_value(value)?)
 }
 

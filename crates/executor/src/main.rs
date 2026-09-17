@@ -201,6 +201,34 @@ async fn execute(
         .join(lease.lease_token.simple().to_string());
     tokio::fs::create_dir_all(directory.parent().context("staging path")?).await?;
     tokio::fs::create_dir(&directory).await?;
+    if let Some(grader) = &lease.revision.grader
+        && let Some(expected) = &grader.source_digest
+    {
+        let response = http
+            .get(format!("{base}/grader"))
+            .query(&[("lease_token", lease.lease_token.to_string())])
+            .bearer_auth(token)
+            .send()
+            .await?;
+        let bytes = bounded(response, MAX_SNAPSHOT_BYTES * 2).await?;
+        ensure!(
+            &digest(&bytes) == expected,
+            "grader snapshot digest mismatch"
+        );
+        let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
+        ensure!(snapshot.sha == grader.revision, "grader commit mismatch");
+        snapshot.validate()?;
+        let root = directory.join("grader");
+        tokio::fs::create_dir(&root).await?;
+        #[cfg(unix)]
+        tokio::fs::set_permissions(&root, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .await?;
+        for (path, blob) in &snapshot.files {
+            let destination = root.join(path);
+            tokio::fs::create_dir_all(destination.parent().context("grader source path")?).await?;
+            write(&destination, &blob.bytes()?, blob.mode == "100755").await?;
+        }
+    }
     let source = directory.join("source");
     tokio::fs::create_dir(&source).await?;
     for (path, blob) in &snapshot.files {

@@ -196,6 +196,7 @@ async fn browser_and_worker_boundaries() -> Result<()> {
         )
         .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    shared_runner_boundaries(&pool, &admin, &app, &worker).await?;
     let response = app
         .clone()
         .oneshot(
@@ -266,4 +267,114 @@ fn signature(body: &str) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(&[7; 32]).unwrap();
     mac.update(body.as_bytes());
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+}
+
+async fn shared_runner_boundaries(
+    pool: &PgPool,
+    admin: &PgPool,
+    app: &axum::Router,
+    internal: &axum::Router,
+) -> Result<()> {
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT g.id,g.submission_id FROM grading_runs g JOIN assignment_revisions v ON v.digest=g.revision_digest WHERE g.public_run_id IS NOT NULL AND v.grader_source_digest IS NOT NULL LIMIT 1").fetch_optional(pool).await?;
+    let Some((private_run, submission)) = row else {
+        anyhow::bail!(
+            "shared runner fixture missing; run tests/database.sh for the complete fixture"
+        );
+    };
+    let student = identity::new_session(pool, 8001, "user-8001", None).await?;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/runs/{private_run}/report"))
+                .header("cookie", format!("__Host-grading-session={student}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 65536).await?;
+    let report: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(report["points"], 9);
+    assert_eq!(report["public_points"], 18);
+    assert!(!String::from_utf8_lossy(&body).contains("private-input-marker"));
+    assert!(report.get("score").is_none());
+    let administrator = identity::new_session(pool, 200, "administrator", None).await?;
+    identity::admin_change(admin, 200, true, false, "fixture", "private report review").await?;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/runs/{private_run}/report"))
+                .header("cookie", format!("__Host-grading-session={administrator}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&to_bytes(response.into_body(), 65536).await?)
+            .contains("private-input-marker")
+    );
+    identity::admin_change(admin, 200, false, true, "fixture", "review complete").await?;
+
+    let operator = PgPool::connect(&std::env::var("TEST_OPERATOR_DATABASE_URL")?).await?;
+    let token = grading_core::security::token();
+    sqlx::query("INSERT INTO workers(id,token_hash,profiles,resource_caps) VALUES('snapshot-worker',$1,ARRAY['registered-v1'],'{\"cpu\":10,\"memory_gib\":32,\"storage_gib\":64}')")
+        .bind(grading_core::security::digest(&token)).execute(&operator).await?;
+    let identity = grading_store::grading::authenticate(pool, &token).await?;
+    grading_store::grading::enqueue_run(pool, submission, true).await?;
+    let lease = grading_store::grading::lease(pool, &identity, &identity.profiles)
+        .await?
+        .unwrap();
+    for (lease_token, authorized, expected) in [
+        (lease.lease_token, false, StatusCode::UNAUTHORIZED),
+        (Uuid::new_v4(), true, StatusCode::NOT_FOUND),
+        (lease.lease_token, true, StatusCode::OK),
+    ] {
+        let mut request = Request::builder().uri(format!(
+            "/internal/tasks/{}/grader?lease_token={lease_token}",
+            lease.task_id
+        ));
+        if authorized {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        let response = internal
+            .clone()
+            .oneshot(request.body(Body::empty())?)
+            .await?;
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            let bytes = to_bytes(response.into_body(), 65536).await?;
+            assert_eq!(
+                grading_core::security::digest(&bytes),
+                lease
+                    .revision
+                    .grader
+                    .as_ref()
+                    .unwrap()
+                    .source_digest
+                    .as_ref()
+                    .unwrap()
+                    .as_str()
+            );
+            let snapshot: grading_core::integrity::Snapshot = serde_json::from_slice(&bytes)?;
+            assert_eq!(
+                snapshot.files["private/cases.json"].bytes()?,
+                b"private-test-marker"
+            );
+        }
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/internal/tasks/{}/grader?lease_token={}",
+                    lease.task_id, lease.lease_token
+                ))
+                .header("cookie", format!("__Host-grading-session={student}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
 }

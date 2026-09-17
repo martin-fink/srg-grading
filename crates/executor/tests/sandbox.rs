@@ -156,6 +156,7 @@ fn registered_exercises_have_separate_private_checker_and_bounded_decisions() {
             }],
         },
         grader: Some(Grader {
+            source_digest: None,
             workflow: None,
             tests: vec![PrivateTest {
                 id: "one".into(),
@@ -194,6 +195,7 @@ fn registered_exercises_have_separate_private_checker_and_bounded_decisions() {
         staging_root: "/source".into(),
         profiles: BTreeMap::new(),
         registry: Some(Registry {
+            runner_images: vec![],
             image_prefix: "registry.example/grading".into(),
             resources: assignment.resources.clone(),
             timeout_seconds: 86400,
@@ -342,9 +344,10 @@ fn script_controller_and_student_commands_have_separate_mounts() {
             tests: vec![],
         },
         grader: Some(Grader {
+            source_digest: Some("d".repeat(64)),
             repository: "org/private".into(),
             revision: "a".repeat(40),
-            image: format!("registry.example/grading/grader@sha256:{}", "b".repeat(64)),
+            image: assignment.image.clone(),
             tests: vec![],
             workflow: Some(Workflow {
                 public_command: vec!["/bin/grade-public".into()],
@@ -364,7 +367,7 @@ fn script_controller_and_student_commands_have_separate_mounts() {
         revision,
         baseline: None,
     };
-    let config = Config {
+    let mut config = Config {
         api_url: "https://worker.example".into(),
         token_file: "/token".into(),
         tls_identity_file: None,
@@ -375,6 +378,7 @@ fn script_controller_and_student_commands_have_separate_mounts() {
         staging_root: "/source".into(),
         profiles: BTreeMap::new(),
         registry: Some(Registry {
+            runner_images: vec![assignment.image.clone()],
             image_prefix: "registry.example/grading".into(),
             resources: assignment.resources,
             timeout_seconds: 86400,
@@ -421,6 +425,21 @@ fn script_controller_and_student_commands_have_separate_mounts() {
     }
     assert!(student.to_string().contains("cc src/main.c"));
     assert_eq!(pod["volumes"][0]["persistentVolumeClaim"]["readOnly"], true);
+    let controller = &private["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(controller["image"], pod["containers"][0]["image"]);
+    assert_eq!(controller["workingDir"], "/grader");
+    assert!(
+        controller["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["mountPath"] == "/grader" && m["readOnly"] == true)
+    );
+    assert!(!student.to_string().contains("/grader"));
+    assert!(pod["containers"][0].get("env").is_none());
+    assert!(pod["containers"][0].get("envFrom").is_none());
+    config.registry.as_mut().unwrap().runner_images.clear();
+    assert!(controller_job(&config, &lease, 60).is_err());
     let mut invalid = request;
     invalid.command.clear();
     assert!(execution_job(&config, &lease, &invalid, 60).is_err());
