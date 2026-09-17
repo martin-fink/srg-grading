@@ -1,3 +1,44 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Administration · Grading portal</title><link rel="stylesheet" href="/static/style.css"></head><body>
-<header><div class="bar"><a class="brand" href="/">Technical University of Munich<span>Grading portal</span></a><nav><span>{{ login }}</span><a href="/">Assignments</a></nav></div></header>
-<main><p class="eyebrow">Course administration</p><h1>Course overview</h1><div class="table-scroll"><table><thead><tr><th>Course</th><th>Enrolled</th><th>Repositories</th><th>Needs review</th><th>Failed operations</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.course }}</td><td>{{ row.enrolled }}</td><td>{{ row.repositories }}</td><td>{{ row.needs_review }}</td><td>{{ row.failed_tasks }}</td></tr>{% endfor %}</tbody></table></div><p class="muted">Imports, extensions, grade overrides, exports, and administrator membership are managed through the local administration CLI.</p></main><footer>Technical University of Munich · Repository-first grading</footer></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Administration · Grading portal</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <div class="bar"><a class="brand" href="/">Technical University of Munich<span>Grading portal</span></a>
+        <nav><span>{{ login }}</span><a href="/">Assignments</a></nav>
+    </div>
+</header>
+<main><p class="eyebrow">Course administration</p>
+    <h1>Course overview</h1>
+    <div class="table-scroll">
+        <table>
+            <thead>
+            <tr>
+                <th>Course</th>
+                <th>Enrolled</th>
+                <th>Repositories</th>
+                <th>Needs review</th>
+                <th>Failed operations</th>
+            </tr>
+            </thead>
+            <tbody>{% for row in rows %}
+            <tr>
+                <td>{{ row.course }}</td>
+                <td>{{ row.enrolled }}</td>
+                <td>{{ row.repositories }}</td>
+                <td>{{ row.needs_review }}</td>
+                <td>{{ row.failed_tasks }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="muted">Imports, extensions, grade overrides, exports, and administrator membership are managed through the
+        local administration CLI.</p></main>
+<footer>Technical University of Munich · Repository-first grading</footer>
+</body>
+</html>

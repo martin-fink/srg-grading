@@ -1,6 +1,8 @@
-/target
+target
 .direnv
-/.local
-/result
-/result-*
-/.env
+.local
+result
+result-*
+.env
+.idea
+
