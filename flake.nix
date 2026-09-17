@@ -64,6 +64,7 @@
               pkgs.removeReferencesTo
             ];
             buildInputs = [ pkgs.openssl ];
+            nativeCheckInputs = [ pkgs.python3 ];
             doCheck = true;
             postFixup = ''
               find "$out/bin" -type f -exec remove-references-to -t ${myRust} '{}' +
