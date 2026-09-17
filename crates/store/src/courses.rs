@@ -187,7 +187,10 @@ pub async fn request_repository(pool: &PgPool, github_id: i64, assignment: Uuid)
         .await?;
     ensure!(now >= opens && now <= deadline, "assignment is not open");
     let id = Uuid::new_v4();
-    let name = format!("submission-{}", id.simple());
+    let (student_id, template): (String, String) = sqlx::query_as(
+        "SELECT e.student_id,r.definition->'assignment'->>'template' FROM enrollments e CROSS JOIN assignment_revisions r WHERE e.id=$1 AND r.digest=$2",
+    ).bind(enrollment).bind(&revision).fetch_one(&mut *tx).await?;
+    let name = repository_name(&template, &student_id, id);
     sqlx::query("INSERT INTO student_repositories(id,enrollment_id,assignment_id,revision_digest,grading_revision,name,provisioning_nonce) VALUES($1,$2,$3,$4,$4,$5,$6)")
         .bind(id).bind(enrollment).bind(assignment).bind(revision).bind(name).bind(Uuid::new_v4()).execute(&mut *tx).await?;
     queue::enqueue(
@@ -275,4 +278,55 @@ pub async fn dashboard(pool: &PgPool, github_id: i64) -> Result<Vec<DashboardRow
          LEFT JOIN LATERAL (SELECT points FROM grade_overrides o WHERE o.repository_id=r.id ORDER BY o.created_at DESC,o.id DESC LIMIT 1) o ON true
          WHERE e.github_id=$1 AND (NOT a.archived OR r.id IS NOT NULL) ORDER BY c.id,a.slug")
         .bind(github_id).fetch_all(pool).await?)
+}
+
+// Keep the full UUID while fitting descriptive components into GitHub's name limit.
+fn repository_name(template: &str, student_id: &str, id: Uuid) -> String {
+    let sanitize = |value: &str| -> String {
+        let value: String = value
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if value.is_empty() {
+            "student".into()
+        } else {
+            value
+        }
+    };
+    let mut template = sanitize(template.rsplit('/').next().unwrap_or(template));
+    let mut student = sanitize(student_id);
+    while template.len() + student.len() > 62 {
+        if template.len() > student.len() {
+            template.pop();
+        } else {
+            student.pop();
+        }
+    }
+    format!("{template}-{student}-{id}")
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    #[test]
+    fn repository_names_preserve_uuid_and_fit_github_limits() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            repository_name("org/echo-template", "123456", id),
+            format!("echo-template-123456-{id}")
+        );
+        let name = repository_name(&format!("org/{}", "t".repeat(100)), &"ü /".repeat(100), id);
+        assert!(grading_core::config::github_repository(&format!(
+            "org/{name}"
+        )));
+        assert!(name.ends_with(&id.to_string()));
+        assert_eq!(name.len(), 100);
+    }
 }

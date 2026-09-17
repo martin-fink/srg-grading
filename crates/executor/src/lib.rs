@@ -150,9 +150,11 @@ pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Res
     let mut command = vec![
         "/bin/sh".to_string(),
         "-c".into(),
-        "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin 2>/tmp/stderr"
-            .into(),
+        "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin".into(),
         "grading".into(),
+        "/bin/python3".into(),
+        "-c".into(),
+        include_str!("../../../scripts/capture-execution.py").into(),
     ];
     command.extend(profile.command.clone());
     Ok(serde_json::from_value(json!({
@@ -250,7 +252,7 @@ pub fn controller_job(config: &Config, lease: &Lease, remaining: u32) -> Result<
     let mut wrapped = vec![
         "/bin/python3".to_owned(),
         "-c".into(),
-        "import os,sys; os.dup2(os.open('/tmp/stderr',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),2); os.execv(sys.argv[1],sys.argv[1:])".into(),
+        "import os,sys; os.dup2(os.open('/control/grader.stderr',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),2); os.execv(sys.argv[1],sys.argv[1:])".into(),
     ];
     wrapped.extend(command.iter().cloned());
     container["command"] = json!(wrapped);

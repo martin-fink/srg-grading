@@ -312,8 +312,71 @@ async fn shared_runner_boundaries(
     assert_eq!(report["public_points"], 18);
     assert!(!String::from_utf8_lossy(&body).contains("private-input-marker"));
     assert!(report.get("score").is_none());
+    let public_run: Uuid = sqlx::query_scalar("SELECT public_run_id FROM grading_runs WHERE id=$1")
+        .bind(private_run)
+        .fetch_one(pool)
+        .await?;
+    for (path, marker, forbidden) in [
+        (
+            format!("/runs/{public_run}/logs"),
+            "compiler-feedback",
+            "controller-private-marker",
+        ),
+        (
+            format!("/runs/{public_run}/report"),
+            "compiler-feedback",
+            "controller-private-marker",
+        ),
+        (
+            format!("/runs/{private_run}/logs"),
+            "View public grading logs",
+            "private-grader-log-marker",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("cookie", format!("__Host-grading-session={student}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(to_bytes(response.into_body(), 1024 * 1024).await?.to_vec())?;
+        assert!(body.contains(marker));
+        assert!(!body.contains(forbidden));
+        if path.ends_with("/logs") {
+            assert!(!body.contains("<script>"));
+        }
+        let unrelated = identity::new_session(pool, 999, "unrelated", None).await?;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("cookie", format!("__Host-grading-session={unrelated}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
     let administrator = identity::new_session(pool, 200, "administrator", None).await?;
     identity::admin_change(admin, 200, true, false, "fixture", "private report review").await?;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/runs/{private_run}/logs"))
+                .header("cookie", format!("__Host-grading-session={administrator}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        String::from_utf8_lossy(&to_bytes(response.into_body(), 1024 * 1024).await?)
+            .contains("private-grader-log-marker")
+    );
     let response = app
         .clone()
         .oneshot(

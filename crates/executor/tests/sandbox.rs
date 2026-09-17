@@ -252,6 +252,7 @@ fn registered_exercises_have_separate_private_checker_and_bounded_decisions() {
     assert!(private_test_job(&config, &lease, "unregistered", 60).is_err());
 
     let mut result = RunResult {
+        logs: vec![],
         score: None,
         private_tests: vec![
             lease.revision.grader.as_ref().unwrap().tests[0].outcome(true, "private-answer-marker"),
@@ -278,6 +279,18 @@ fn registered_exercises_have_separate_private_checker_and_bounded_decisions() {
         }),
     };
     assert_eq!(result.validate(&lease).unwrap(), Some(18));
+    let mut leaked = result.clone();
+    leaked.logs.push(grading_core::protocol::RunLog {
+        student_visible: true,
+        text: "private output".into(),
+    });
+    assert!(leaked.validate(&lease).is_err());
+    let mut oversized = result.clone();
+    oversized.logs.push(grading_core::protocol::RunLog {
+        student_visible: false,
+        text: "x".repeat(grading_core::protocol::MAX_RUN_LOG_BYTES + 1),
+    });
+    assert!(oversized.validate(&lease).is_err());
     let mut omitted = result.clone();
     omitted.private_tests.clear();
     assert!(omitted.validate(&lease).is_err());

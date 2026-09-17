@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if self.has_creating_repository() %}<meta http-equiv="refresh" content="10">{% endif %}
     <title>Assignments · Grading portal</title>
     <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -60,6 +61,10 @@
         </dl>
         {% if !row.sha.is_empty() %}<p class="commit">Registered commit <code>{{ row.sha }}</code></p>{% endif %}
         {% if !row.notice.is_empty() %}<p class="notice">{{ row.notice }}</p>{% endif %}
+        {% if row.creating %}
+        <p class="creation-progress" role="status"><span class="spinner" aria-hidden="true"></span>
+            Creating your repository. This may take a few minutes. This page updates automatically.</p>
+        {% endif %}
         <div class="actions">
             {% if row.can_create %}
             <form method="post" action="/assignments/{{ row.id }}/repository"><input type="hidden" name="csrf"
@@ -67,15 +72,15 @@
                 <button type="submit">Create repository</button>
             </form>
             {% endif %}
-            {% if !row.repository_url.is_empty() %}<a href="{{ row.repository_url }}">Open repository ↗</a>{% endif %}
-            {% if !row.invitation_url.is_empty() %}<a href="{{ row.invitation_url }}">Accept invitation ↗</a>{% endif %}
+            {% if !row.repository_url.is_empty() %}<a href="{{ row.repository_url }}" target="_blank" rel="noopener noreferrer">Open repository ↗</a>{% endif %}
+            {% if !row.invitation_url.is_empty() %}<a href="{{ row.invitation_url }}" target="_blank" rel="noopener noreferrer">Accept invitation ↗</a>{% endif %}
             {% if row.can_submit %}
             <form method="post" action="/repositories/{{ row.repository_id }}/submit"><input type="hidden" name="csrf"
                                                                                              value="{{ csrf }}">
                 <button class="secondary" type="submit">Register current commit</button>
             </form>
             {% endif %}
-            {% if !row.run_id.is_empty() %}<a href="/runs/{{ row.run_id }}/report">View grading report</a>{% endif %}
+            {% if !row.run_id.is_empty() %}<a href="/runs/{{ row.run_id }}/logs">View grading logs</a><a href="/runs/{{ row.run_id }}/report">View grading report</a>{% endif %}
         </div>
     </section>
     {% endfor %}

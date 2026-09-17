@@ -248,6 +248,16 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         assert!(lease.baseline.is_none());
         let scripted = lease.revision.grader.as_ref().unwrap().workflow.is_some();
         let result = grading_core::protocol::RunResult {
+            logs: vec![
+                grading_core::protocol::RunLog {
+                    student_visible: true,
+                    text: "compiler-feedback <script>alert(1)</script>".into(),
+                },
+                grading_core::protocol::RunLog {
+                    student_visible: false,
+                    text: "controller-private-marker".into(),
+                },
+            ],
             schema_version: 1,
             lease_token: lease.lease_token,
             run_id: lease.run_id,
@@ -334,6 +344,10 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
     assert_eq!(baseline.run_id, regrade);
     assert_eq!(baseline.points, 18);
     let result = grading_core::protocol::RunResult {
+        logs: vec![grading_core::protocol::RunLog {
+            student_visible: false,
+            text: "private-grader-log-marker".into(),
+        }],
         schema_version: 1,
         lease_token: lease.lease_token,
         run_id: lease.run_id,

@@ -304,6 +304,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
             .is_err()
     );
     let result = RunResult {
+        logs: vec![],
         score: None,
         private_tests: vec![],
         private: None,

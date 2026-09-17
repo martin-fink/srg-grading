@@ -37,3 +37,9 @@ footer { color: var(--muted); border-top: 1px solid var(--line); padding: 24px 0
 .skip { position: absolute; left: -9999px; } .skip:focus { left: 12px; top: 12px; background: #fff; padding: 8px; }
 .table-scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; text-align: left; } th, td { padding: 14px 12px; border-bottom: 1px solid var(--line); } th { color: var(--dark-blue); background: var(--pale); }
 @media (max-width: 640px) { .bar, main, footer { width: calc(100% - 32px); } .bar { align-items: start; flex-direction: column; } main { padding-top: 32px; } h1 { font-size: 1.9rem; } .facts { grid-template-columns: 1fr; gap: 16px; } .assignment-heading { flex-direction: column; gap: 0; } .actions { gap: 18px; } }
+
+.creation-progress { display: flex; align-items: center; gap: 12px; color: var(--muted); }
+.spinner { flex: 0 0 auto; width: 18px; height: 18px; border: 2px solid var(--line); border-top-color: var(--blue); border-radius: 50%; animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.execution-log { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--pale); padding: 20px; font: .875rem/1.5 monospace; }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

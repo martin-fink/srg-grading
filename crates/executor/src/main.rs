@@ -1,4 +1,5 @@
 //! Restricted Kubernetes grading worker.
+mod logs;
 mod workflow;
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -59,6 +60,9 @@ fn log_failure(stage: &'static str, error: &anyhow::Error) {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install Rustls crypto provider");
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -223,16 +227,9 @@ async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-async fn execute(
-    config: &Config,
-    http: &HttpClient,
-    token: &str,
-    jobs: &Api<Job>,
-    pods: &Api<Pod>,
-    lease: &Lease,
-    base: &str,
-) -> Result<RunResult> {
-    let mut result = RunResult {
+fn initial_result(lease: &Lease) -> RunResult {
+    RunResult {
+        logs: vec![],
         score: None,
         private_tests: vec![],
         private: None,
@@ -246,7 +243,45 @@ async fn execute(
         status: RunStatus::InfrastructureFailed,
         tests: vec![],
         findings: vec![],
+    }
+}
+
+async fn execute(
+    config: &Config,
+    http: &HttpClient,
+    token: &str,
+    jobs: &Api<Job>,
+    pods: &Api<Pod>,
+    lease: &Lease,
+    base: &str,
+) -> Result<RunResult> {
+    let logs = logs::Capture::default();
+    let mut result = match execute_inner(config, http, token, jobs, pods, lease, base, &logs).await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_failure("grading_execute", &error);
+            let details = grading_core::diagnostics::describe(&error);
+            logs.push(lease.baseline.is_none(), &format!("Execution stopped because of an infrastructure or grader error (stage: {}, reason: {}). Contact your instructor.\n", details.stage, details.reason));
+            initial_result(lease)
+        }
     };
+    result.logs = logs.finish();
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_inner(
+    config: &Config,
+    http: &HttpClient,
+    token: &str,
+    jobs: &Api<Job>,
+    pods: &Api<Pod>,
+    lease: &Lease,
+    base: &str,
+    logs: &logs::Capture,
+) -> Result<RunResult> {
+    let mut result = initial_result(lease);
     if let Err(error) = config.approve(lease) {
         log_failure("lease_approval", &error);
         return Ok(result);
@@ -344,7 +379,7 @@ async fn execute(
         .as_ref()
         .is_some_and(|g| g.workflow.is_some())
     {
-        match workflow::execute(config, jobs, pods, lease, &directory).await? {
+        match workflow::execute(config, jobs, pods, lease, &directory, logs).await? {
             workflow::Outcome::Scored(score) => {
                 result.status = if score.invalidated {
                     RunStatus::Invalidated
@@ -375,7 +410,18 @@ async fn execute(
         jobs.create(&PostParams::default(), &definition)
             .await
             .context(Stage("student_job_create"))?;
-        let (success, output) = match wait_job(jobs, pods, name, started, deadline).await? {
+        let (success, output) = match logs::wait(
+            jobs,
+            pods,
+            name,
+            started,
+            deadline,
+            logs,
+            lease.baseline.is_none(),
+            false,
+        )
+        .await?
+        {
             JobOutcome::Output(success, output) => (success == 0, output),
             JobOutcome::Failed(status) => {
                 result.status = status;
@@ -421,7 +467,18 @@ async fn execute(
             jobs.create(&PostParams::default(), &definition)
                 .await
                 .context(Stage("student_job_create"))?;
-            match wait_job(jobs, pods, name, started, deadline).await? {
+            match logs::wait(
+                jobs,
+                pods,
+                name,
+                started,
+                deadline,
+                logs,
+                lease.baseline.is_none(),
+                false,
+            )
+            .await?
+            {
                 JobOutcome::Output(success, output) => result
                     .private_tests
                     .push(test.outcome(success == 0, &output)),
@@ -454,7 +511,17 @@ async fn execute(
         jobs.create(&PostParams::default(), &definition)
             .await
             .context(Stage("student_job_create"))?;
-        let outcome = wait_job(jobs, pods, name, started, deadline).await?;
+        let outcome = logs::wait(
+            jobs,
+            pods,
+            name,
+            started,
+            deadline,
+            logs,
+            lease.baseline.is_none(),
+            false,
+        )
+        .await?;
         jobs.delete(name, &DeleteParams::default()).await?;
         let output = match outcome {
             JobOutcome::Output(0, output) if output.len() <= 65536 => output,
@@ -564,7 +631,7 @@ async fn wait_job(
                     .logs(
                         pod.metadata.name.as_deref().context("pod name")?,
                         &LogParams {
-                            limit_bytes: Some(65537),
+                            limit_bytes: Some(1024 * 1024),
                             ..Default::default()
                         },
                     )

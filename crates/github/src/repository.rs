@@ -333,7 +333,7 @@ impl GitHub {
         nonce: Uuid,
     ) -> Result<Repository> {
         ensure!(
-            identifier(org) && identifier(name),
+            identifier(org) && grading_core::config::github_repository(&format!("{org}/{name}")),
             "invalid repository allocation"
         );
         let organization: Value = self

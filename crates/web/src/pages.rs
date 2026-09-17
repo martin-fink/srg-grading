@@ -14,6 +14,12 @@ pub struct Dashboard {
     pub rows: Vec<AssignmentRow>,
 }
 
+impl Dashboard {
+    pub fn has_creating_repository(&self) -> bool {
+        self.rows.iter().any(|row| row.creating)
+    }
+}
+
 pub struct AssignmentRow {
     pub id: String,
     pub course: String,
@@ -28,6 +34,7 @@ pub struct AssignmentRow {
     pub points: String,
     pub public_points: String,
     pub run_id: String,
+    pub creating: bool,
     pub can_create: bool,
     pub can_submit: bool,
     pub notice: String,
@@ -105,6 +112,7 @@ impl From<DashboardRow> for AssignmentRow {
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "—".into()),
             run_id: row.run_id.map(|id| id.to_string()).unwrap_or_default(),
+            creating: row.state.as_deref() == Some("creating") && !row.closure_due.unwrap_or(false),
             can_create: open && row.repository_id.is_none(),
             can_submit: open && row.state.as_deref() == Some("ready"),
             notice: if row.needs_review.unwrap_or(false) {
@@ -140,6 +148,7 @@ pub fn preview() -> Dashboard {
                 points: "16 / 20".into(),
                 public_points: "16".into(),
                 run_id: String::new(),
+                creating: false,
                 can_create: false,
                 can_submit: false,
                 notice: String::new(),
@@ -158,6 +167,7 @@ pub fn preview() -> Dashboard {
                 points: "— / 20".into(),
                 public_points: "—".into(),
                 run_id: String::new(),
+                creating: false,
                 can_create: false,
                 can_submit: false,
                 notice: String::new(),
@@ -171,6 +181,15 @@ pub fn preview() -> Dashboard {
 pub struct AdminPage {
     pub login: String,
     pub rows: Vec<AdminRow>,
+}
+
+#[derive(Template)]
+#[template(path = "logs.html")]
+pub struct LogsPage {
+    pub status: String,
+    pub sha: String,
+    pub text: String,
+    pub public_run_id: String,
 }
 
 pub struct AdminRow {

@@ -177,9 +177,20 @@ pub struct TestResult {
     pub log: String,
 }
 
+pub const MAX_RUN_LOG_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunLog {
+    pub student_visible: bool,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunResult {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<RunLog>,
     pub schema_version: u32,
     pub lease_token: Uuid,
     pub run_id: Uuid,
@@ -220,6 +231,15 @@ impl RunResult {
                     .iter()
                     .all(|f| f.path.len() <= 1024 && f.reason.len() <= 256),
             "findings too large"
+        );
+        ensure!(
+            self.logs.len() <= 128
+                && self.logs.iter().map(|log| log.text.len()).sum::<usize>() <= MAX_RUN_LOG_BYTES,
+            "run logs exceed limit"
+        );
+        ensure!(
+            lease.baseline.is_none() || self.logs.iter().all(|log| !log.student_visible),
+            "private run logs cannot be student visible"
         );
         let scoring = matches!(self.status, RunStatus::Completed | RunStatus::Invalidated);
         if !scoring {

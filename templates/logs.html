@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Grading logs · Grading portal</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header><div class="bar"><a class="brand" href="/">Technical University of Munich · Grading portal</a></div></header>
+<main>
+    <a href="/">Back to assignments</a>
+    <h1>Grading logs</h1>
+    <p>Status: {{ status }}</p>
+    <p class="commit">Commit <code>{{ sha }}</code></p>
+    {% if !public_run_id.is_empty() %}<p><a href="/runs/{{ public_run_id }}/logs">View public grading logs</a></p>{% endif %}
+    <p class="muted">Output is limited to 256 KiB per run. Private grader output is available to instructors.</p>
+    <pre class="execution-log">{{ text }}</pre>
+</main>
+</body>
+</html>

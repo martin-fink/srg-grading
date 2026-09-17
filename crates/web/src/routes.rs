@@ -140,6 +140,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/assignments/{id}/repository", post(create_repository))
         .route("/repositories/{id}/submit", post(submit))
         .route("/runs/{id}/report", get(report))
+        .route("/runs/{id}/logs", get(run_logs))
         .route(
             "/webhooks/github",
             post(webhook).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
@@ -520,6 +521,44 @@ async fn webhook(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn run_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> HttpResult<Html<String>> {
+    let session = authenticated(&state, &headers).await?;
+    let (hash, public_run, status, sha): (Option<String>, Option<Uuid>, String, String) = sqlx::query_as(
+        "SELECT g.report_digest,g.public_run_id,g.status,s.sha FROM grading_runs g JOIN submissions s ON s.id=g.submission_id JOIN student_repositories r ON r.id=s.repository_id JOIN enrollments e ON e.id=r.enrollment_id WHERE g.id=$1 AND (e.github_id=$2 OR EXISTS(SELECT 1 FROM admins WHERE github_id=$2))"
+    ).bind(id).bind(session.github_id).fetch_one(&state.pool).await?;
+    let hash = hash.ok_or(HttpError(StatusCode::NOT_FOUND))?;
+    let result: RunResult =
+        serde_json::from_slice(&state.artifacts.get(&hash).await?).map_err(anyhow::Error::from)?;
+    let mut text = String::new();
+    if public_run.is_some() && !session.admin {
+        text.push_str("Private grading logs are available to instructors. Open the public run's logs for build and public-test feedback.\n");
+    } else {
+        for log in result.logs {
+            if session.admin || log.student_visible {
+                text.push_str(&log.text);
+                text.push('\n');
+            }
+        }
+        if text.is_empty() {
+            text.push_str("No execution logs were retained for this run.\n");
+        }
+    }
+    Ok(Html(
+        crate::pages::LogsPage {
+            status,
+            sha,
+            text,
+            public_run_id: public_run.map(|id| id.to_string()).unwrap_or_default(),
+        }
+        .render()
+        .map_err(anyhow::Error::from)?,
+    ))
+}
+
 async fn report(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -537,7 +576,20 @@ async fn report(
         }))
         .map_err(anyhow::Error::from)?
     } else {
-        state.artifacts.get(&hash).await?
+        let bytes = state.artifacts.get(&hash).await?;
+        if session.admin {
+            bytes
+        } else {
+            let mut result: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(anyhow::Error::from)?;
+            if let Some(logs) = result.get_mut("logs").and_then(|logs| logs.as_array_mut()) {
+                logs.retain(|log| log["student_visible"] == true);
+            }
+            result
+                .as_object_mut()
+                .map(|object| object.remove("lease_token"));
+            serde_json::to_vec(&result).map_err(anyhow::Error::from)?
+        }
     };
     Ok((
         [

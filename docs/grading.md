@@ -1,10 +1,35 @@
 # Submission and execution protocol
 
+## Stored execution logs
+
+The executor captures public student Jobs' stdout, stderr, exit codes, and execution
+status before deleting Pods. Reports retain at most 256 KiB of logs per run,
+including failed runs. They are content-addressed artifacts backed up with the
+application volume; the dashboard links to the latest run's escaped, plain-text
+log viewer. Completed historical reports are retained as well. Older runs created
+before log capture was deployed may have no transcript.
+
+Students can view only their own public execution output. Controller logs and
+all post-deadline private grading output are restricted to current administrators.
+The private run's log page links back to its public baseline's logs. Raw report
+downloads enforce the same visibility rules. Scripts should execute student builds
+through `grading-run` so compiler diagnostics are included in public Job logs;
+controller stderr is retained for instructor diagnostics. Abruptly killed processes
+may not flush their output, so a timeout can have only an execution-status message.
+
+Deploy both `grading-web` and `grading-executor` for the viewer and capture support.
+Schema migrations are not required. The executor also installs the Rustls ring
+crypto provider before initializing HTTPS/Kubernetes clients.
+
 ## Repository creation
 
 A CSRF-protected form checks the numeric GitHub account ID against enrollment and
 assignment availability. An advisory lock and unique constraint allocate one
-opaque repository name. Provisioning runs separately in `gradingctl work`.
+repository per enrollment and assignment. New repository names use
+`template-name-student-id-uuid`, where the student ID is the roster's `student_id`.
+Unsupported characters become hyphens; long descriptive components are shortened
+to fit 100 characters while retaining the full UUID. Existing allocations keep
+their names. Provisioning runs separately in `gradingctl work`.
 
 The adapter creates a private, organization-owned repository with an unpredictable
 provisioning marker. After a failed response it recovers only a matching private

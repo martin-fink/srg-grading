@@ -1,5 +1,5 @@
 //! Private per-run file channel between instructor scripts and isolated student Jobs.
-use crate::{JobOutcome, wait_job, write};
+use crate::{JobOutcome, logs, write};
 use anyhow::{Context, Result, ensure};
 use grading_core::diagnostics::Stage;
 use grading_core::protocol::{Lease, RunStatus, ScriptScore};
@@ -28,6 +28,7 @@ pub async fn execute(
     pods: &Api<Pod>,
     lease: &Lease,
     directory: &Path,
+    logs: &logs::Capture,
 ) -> Result<Outcome> {
     for name in ["control", "context", "platform", "requests"] {
         tokio::fs::create_dir(directory.join(name)).await?;
@@ -71,9 +72,15 @@ pub async fn execute(
         .await
         .context(Stage("controller_job_create"))?;
     let outcome = tokio::select! {
-        outcome=wait_job(jobs,pods,name,started,deadline)=>outcome?,
-        result=serve(config,jobs,pods,lease,directory,started,deadline)=>{return Ok(Outcome::Failed(result?));}
+        outcome=logs::wait(jobs,pods,name,started,deadline,logs,false,false)=>outcome,
+        result=serve(config,jobs,pods,lease,directory,started,deadline,logs)=>result.map(JobOutcome::Failed),
     };
+    if let Ok(file) = std::fs::File::open(directory.join("control/grader.stderr")) {
+        let mut output = String::new();
+        let _ = file.take(65536).read_to_string(&mut output);
+        logs.push(false, &output);
+    }
+    let outcome = outcome?;
     jobs.delete(name, &DeleteParams::default()).await?;
     let output = match outcome {
         JobOutcome::Output(0, output) => output,
@@ -89,6 +96,7 @@ pub async fn execute(
     Ok(Outcome::Scored(result))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     config: &Config,
     jobs: &Api<Job>,
@@ -97,6 +105,7 @@ async fn serve(
     directory: &Path,
     started: Instant,
     deadline: Duration,
+    logs: &logs::Capture,
 ) -> Result<RunStatus> {
     let mut handled = HashMap::new();
     loop {
@@ -133,7 +142,17 @@ async fn serve(
                 jobs.create(&PostParams::default(), &definition)
                     .await
                     .context(Stage("student_job_create"))?;
-                let outcome = wait_job(jobs, pods, name, started, deadline).await?;
+                let outcome = logs::wait(
+                    jobs,
+                    pods,
+                    name,
+                    started,
+                    deadline,
+                    logs,
+                    lease.baseline.is_none(),
+                    true,
+                )
+                .await?;
                 jobs.delete(name, &DeleteParams::default()).await?;
                 let (exit_code, mut stdout) = match outcome {
                     JobOutcome::Output(code, stdout) => (code, stdout),
