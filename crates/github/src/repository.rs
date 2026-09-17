@@ -13,6 +13,30 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+fn verify_base_permission(organization: &Value) -> Result<()> {
+    let permission = match organization.get("default_repository_permission") {
+        Some(Value::String(value)) => match value.as_str() {
+            "none" => return Ok(()),
+            "read" => "read",
+            "write" => "write",
+            "admin" => "admin",
+            _ => "unknown",
+        },
+        None | Some(Value::Null) => "unavailable",
+        _ => "unknown",
+    };
+    tracing::warn!(
+        stage = "organization_permissions",
+        base_permission = permission,
+        "cannot verify organization base permission is none"
+    );
+    match permission {
+        "unavailable" => anyhow::bail!("organization base permission unavailable"),
+        "unknown" => anyhow::bail!("organization base permission unrecognized"),
+        _ => anyhow::bail!("organization base permission must be none"),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Repository {
     pub id: i64,
@@ -26,6 +50,32 @@ pub struct Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_permission_requires_explicit_none() {
+        assert!(verify_base_permission(&json!({"default_repository_permission":"none"})).is_ok());
+        for value in [json!({}), json!({"default_repository_permission":null})] {
+            assert_eq!(
+                verify_base_permission(&value).unwrap_err().to_string(),
+                "organization base permission unavailable"
+            );
+        }
+        for permission in ["read", "write", "admin"] {
+            assert_eq!(
+                verify_base_permission(&json!({"default_repository_permission":permission}))
+                    .unwrap_err()
+                    .to_string(),
+                "organization base permission must be none"
+            );
+        }
+        let error =
+            verify_base_permission(&json!({"default_repository_permission":"SECRET"})).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "organization base permission unrecognized"
+        );
+    }
+
     use axum::{
         Json, Router,
         extract::State,
@@ -289,10 +339,7 @@ impl GitHub {
         let organization: Value = self
             .request(Method::GET, &format!("/orgs/{org}"), None)
             .await?;
-        ensure!(
-            organization["default_repository_permission"] == "none",
-            "organization base permission must be none"
-        );
+        verify_base_permission(&organization)?;
         let marker = format!("grading-provision:{nonce}");
         let repository = match self.optional::<Repository>(&format!("/repos/{org}/{name}")).await? {
             Some(repository) => repository,

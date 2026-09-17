@@ -35,6 +35,12 @@ fn failure_details(error: &anyhow::Error) -> (&'static str, &'static str, Option
     for cause in error.chain() {
         let reason = match cause.to_string().as_str() {
             "organization base permission must be none" => "organization_base_permissions",
+            "organization base permission unavailable" => {
+                "organization_base_permission_unavailable"
+            }
+            "organization base permission unrecognized" => {
+                "organization_base_permission_unrecognized"
+            }
             "repository inherits team access; instructor review required" => {
                 "inherited_team_access"
             }
