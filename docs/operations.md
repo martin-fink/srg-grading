@@ -6,24 +6,20 @@ That repository owns Kubernetes resources, nginx, certificates, secret provision
 storage, service timers, backups, monitoring, and legacy Autolab/Tango removal.
 This repository supplies Rust binaries, migrations, and Nix-built container images.
 
-## Images and runtime credentials
+## Native services and runtime credentials
 
-Build `web-image`, `cli-image`, `postgres-image`, and `executor-image` using the
-root flake. `nix/images.nix` and `nix/postgres-entrypoint.sh` are image build inputs.
-`nix/database-grants.sql` is embedded by the CLI; `nix/database-roles.sql` and the
-grants file are also used by the database tests. These files remain here.
+The cluster installs the Rust binaries from the public HTTPS flake input. PostgreSQL,
+web/tasks, migrations, synchronization and administration run as native services or
+commands on Astrid. Mickey runs the executor as a systemd service; Kubernetes runs
+only student submissions. The optional image outputs and PostgreSQL image entrypoint
+remain in this repository, but are not used by the cluster deployment.
+`nix/database-grants.sql` remains embedded in the CLI and used by database tests.
 
-The cluster pins the application source over SSH, builds for x86_64 Linux, and
-loads immutable image references into containerd. Deployment commands and source
-updates are documented in the infrastructure repository, not a Compose stack.
-
-PostgreSQL runs as UID 10002 with dedicated persistent storage. The image reads
-`/run/secrets/postgres-password`, `grading_owner-password`, `grading_web-password`,
-`grading_operator-password`, and `grading_admin-password` from that same directory.
-All roles have distinct passwords and use SCRAM. Web/task containers (UID 10001)
-receive only the web database URL; migration, operator, and admin Jobs receive
-their respective role URLs. The executor (UID 10004) receives no database or App
-credentials. Sandboxes run as UID 10003 without any credentials.
+The dedicated PostgreSQL 18 service uses a private Unix socket and peer authentication,
+with OS accounts mapped to the owner/web/operator/admin database roles. It has no TCP
+listener or database passwords and is separate from Astrid's shared PostgreSQL instance.
+Connection files under `/etc/grading/*.url` contain role names and socket paths.
+The executor receives no database or App credentials. Sandboxes receive no credentials.
 
 Application credentials are runtime files. The GitHub configuration JSON is:
 
@@ -33,7 +29,7 @@ Application credentials are runtime files. The GitHub configuration JSON is:
   "installation_id": 123,
   "client_id": "CLIENT_ID",
   "client_secret": "RUNTIME_SECRET",
-  "private_key_file": "/run/secrets/github/github.pem",
+  "private_key_file": "/run/grading-github/github.pem",
   "callback_url": "https://grading.dos.cit.tum.de/auth/callback"
 }
 ```
@@ -42,20 +38,19 @@ The cluster's SOPS keys are `grading-github-config`, `grading-github-private-key
 and `grading-github-webhook-secret`. The webhook secret must contain at least 32
 bytes and match GitHub exactly. Keep credentials out of images and the Nix store.
 
-Migrations apply schema and grants using the owner credential before web/tasks
-start. The runtime never migrates at startup. Administration is launched from
-Astrid through the infrastructure wrapper, for example:
+Migrations apply schema and grants using the owner OS/database account before
+web/tasks start. Administration uses the real application binary directly on Astrid:
 
 ```sh
-sudo gradingctl admin grant --github-username martin-fink --reason 'Course administrator'
-sudo gradingctl admin list
+sudo -u grading-admin gradingctl --database-url-file /etc/grading/admin.url \
+  admin grant --github-username martin-fink --reason 'Course administrator'
+sudo -u grading-admin gradingctl --database-url-file /etc/grading/admin.url admin list
 ```
 
-That wrapper runs the application CLI in a short-lived Kubernetes Job and supplies
-the host operator identity. Admin grant/revoke resolve current GitHub handles
-before changing membership; failed lookups make no changes. Admin Jobs have GitHub
-network access but no App secrets. Web and operator DB roles cannot grant admins
-or assume the admin role. See the README for the underlying CLI commands.
+Use `grading-operator` and `/etc/grading/operator.url` for course/worker commands,
+adding `--github-config /run/grading-github/github.json` when needed. The CLI records
+`SUDO_USER`. Admin commands resolve GitHub handles without needing the App key.
+Web/operator roles cannot grant admins or assume the admin role.
 
 ## GitHub App pilot configuration
 
@@ -86,33 +81,45 @@ starts from a pinned tree without carrying private solution history.
 
 ## Executor and sandbox contract
 
-The infrastructure runs the executor on Mickey. It generates
-`/etc/grading/executor.toml` on Astrid from
-`services.grading-infrastructure.executor.profiles` and mounts it into the executor
-Pod with runtime credentials. [executor.toml.example](executor.toml.example)
-documents the application's configuration format; it is not a deployable profile.
-Empty approved profiles prevent the cluster wrapper from starting the executor.
+For the new central registration workflow, see [exercises](exercises.md). It uses
+`gradingctl exercise add/update`, a dedicated Nix builder, and one `[registry]`
+executor policy for the `registered-v1` worker profile. The cluster must pin the application revision supporting that workflow and
+provide the dedicated builder environment. The profile-file workflow below remains
+available for legacy exercises. Apply migration 0002 and upgrade all processes
+before registering exercises with the new application version.
+
+The infrastructure runs the executor as a native systemd service on Mickey. Install
+reviewed course-owned profile tables in the root-owned runtime file
+`/etc/grading/profiles.toml` there and restart `grading-executor`. The service combines
+that file with cluster-owned connection settings into `/run/grading-executor/config.toml`.
+It uses systemd credentials for the worker token, CA trust and namespace-scoped
+Kubernetes kubeconfig. None of these files enter the student staging volume or Nix store.
+Register the corresponding worker profile names and resource caps using the real CLI
+on Astrid. No cluster rebuild is needed when legacy exercise profiles change.
+[executor.toml.example](executor.toml.example) describes the complete configuration.
 
 Profiles independently approve image digests, commands, timeouts, and resource
-caps. The executor and student Jobs share a dedicated staging PVC. Student mounts
+caps. The executor stages files in a host directory backing the student Jobs' local PVC. Student mounts
 are read-only per-lease subpaths; credentials never belong on that volume. The
 cluster configures the `gvisor` RuntimeClass, namespace policies, admission rules,
 restricted ServiceAccount, PID/resource limits, and log rotation. Test enforcement
 on the actual nodes before running student submissions.
 
-The worker API is separate from browser routes. The cluster terminates mTLS using
-the existing internal CA and restricts the endpoint to the executor network.
-The application verifies a bearer token whose hash is stored in the database.
-Register and start it from Astrid using the infrastructure wrapper:
+The worker API is separate from browser routes. Astrid nginx uses the existing CA
+for server TLS and restricts the endpoint to Mickey. The executor verifies that CA;
+the application authenticates the worker bearer token against its stored hash.
+The public proxy must never expose `/internal/` or the worker listener.
+
+Register the worker on Astrid (replace the profile name with the approved profile):
 
 ```sh
-sudo gradingctl register-worker --profile functional-v1 --cpu 10 --memory-gib 32 --storage-gib 64
-sudo gradingctl executor
+sudo -u grading-operator gradingctl --database-url-file /etc/grading/operator.url \
+  worker register --id mickey-1 --token-file /var/lib/grading/worker-token \
+  --profile YOUR_PROFILE --cpu 10 --memory-gib 32 --storage-gib 64
 ```
 
-Use a real profile matching the declarative allowlist. The worker ID is `mickey-1`;
-`sudo gradingctl operator worker revoke --id mickey-1` rejects further leases and
-reports. The public proxy must never expose `/internal/` or the worker listener.
+Use `worker revoke --id mickey-1` under the same account/connection to revoke it.
+See the cluster documentation for initial credential transfer and executor startup.
 
 ## Synchronization, metrics, and backups
 

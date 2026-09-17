@@ -121,6 +121,22 @@ The initial schema implements the exact receipt-time cutoff policy. Extensions a
 explicit and must precede closure. After closure, use the audited event-selection
 override; neither timestamps nor existing event records are rewritten.
 
+## Register and update exercises
+
+Instructors can now register template and private grader repositories centrally
+with `gradingctl exercise add`, then advance their pinned hashes with
+`gradingctl exercise update`. A locked Nix flake builds separate student and
+grader images. One executor registry policy replaces per-exercise profile edits.
+Schema version 2 supports arbitrary instructor scripts and public test formats.
+Private scripts run only after the effective deadline, manually queued with
+`gradingctl exercise private-grade`. They receive the original public points and
+can adjust or invalidate them. Student code runs in separate sandboxes.
+
+See [the exercise workflow](docs/exercises.md) for commands, the grader contract,
+build configuration, and cluster integration. Template updates affect future
+repositories only. `--existing` explicitly rolls a new grader out to future runs
+for existing repositories; earlier runs remain unchanged, and regrading is explicit.
+
 ## Instructor configuration
 
 [The fixture](tests/fixtures/course.toml) illustrates the strict TOML shape, including
@@ -142,7 +158,7 @@ outside those prefixes fail integrity. `.github/` and `tests/` cannot be editabl
 Reference solutions and private manifests must never be in the student template.
 Pin workflow Actions and image/dependency inputs in the approved template.
 
-The functional prototype uses public stdin/stdout test cases; see
+Legacy profiles use public stdin/stdout test cases; see
 [the sample suite](tests/fixtures/cases.toml). The independently configured worker
 command executes the student's program, and the trusted executor compares its
 output with those same public expectations. Programs cannot submit official points

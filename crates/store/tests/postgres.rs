@@ -1,4 +1,6 @@
 //! Integration coverage runs against the disposable SCRAM database in tests/database.sh.
+#[path = "support/exercises.rs"]
+mod exercises;
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use grading_core::{
@@ -105,6 +107,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
     };
     let manifest = Manifest::generate(&source, vec!["src/".into()])?;
     let revision = Revision {
+        grader: None,
         course_id: config.course.id.clone(),
         assignment_id: "echo".into(),
         assignment: assignment.clone(),
@@ -301,6 +304,9 @@ async fn database_invariants_and_recovery() -> Result<()> {
             .is_err()
     );
     let result = RunResult {
+        score: None,
+        private_tests: vec![],
+        private: None,
         schema_version: 1,
         lease_token: lease.lease_token,
         run_id: run,
@@ -439,6 +445,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!(status, "failed");
+    exercises::publication_rollout_and_permissions().await?;
     Ok(())
 }
 

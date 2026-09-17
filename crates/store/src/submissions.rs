@@ -158,7 +158,7 @@ pub async fn override_grade(
 ) -> Result<()> {
     ensure!(!reason.trim().is_empty(), "reason required");
     let mut tx = pool.begin().await?;
-    let max: i32 = sqlx::query_scalar("SELECT v.max_points FROM student_repositories r JOIN assignment_revisions v ON v.digest=r.revision_digest WHERE r.id=$1 FOR UPDATE OF r").bind(repository).fetch_one(&mut *tx).await?;
+    let max: i32 = sqlx::query_scalar("SELECT v.max_points FROM student_repositories r JOIN assignment_revisions v ON v.digest=r.grading_revision WHERE r.id=$1 FOR UPDATE OF r").bind(repository).fetch_one(&mut *tx).await?;
     ensure!((0..=max).contains(&points), "override outside point bounds");
     sqlx::query("INSERT INTO grade_overrides(id,repository_id,points,reason,operator) VALUES($1,$2,$3,$4,$5)").bind(Uuid::new_v4()).bind(repository).bind(points).bind(reason).bind(operator).execute(&mut *tx).await?;
     audit(&mut tx, operator, "grade.override", repository, reason).await?;

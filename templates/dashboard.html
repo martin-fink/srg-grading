@@ -30,7 +30,7 @@
     <p class="muted">Use the GitHub account you supplied for enrollment. Course access is managed by your
         instructor.</p>
     {% else %}
-    <p class="intro">Your repositories and official public-test results, in one place.</p>
+    <p class="intro">Your repositories and official grading results, in one place.</p>
     {% if rows.is_empty() %}
     <section class="empty"><h2>No courses yet</h2>
         <p>This GitHub account is not enrolled in a course. Contact your instructor to check your enrollment.</p>
@@ -50,6 +50,10 @@
             <div>
                 <dt>Official points</dt>
                 <dd class="points">{{ row.points }}</dd>
+            </div>
+            <div>
+                <dt>Public-test points</dt>
+                <dd>{{ row.public_points }}</dd>
             </div>
             <div>
                 <dt>Grading status</dt>
@@ -82,7 +86,8 @@
             commit here before the deadline. The latest eligible registered commit is your submission. Commits received
             after the deadline are not backdated.</p>
         <p>GitHub Actions provides feedback. Official points come from an independent run of the public tests for the
-            recorded commit. Integrity failures need review and are not automatic misconduct findings.</p>
+            recorded commit. Private checks may adjust or invalidate those points; the grading report records the reason.
+            Integrity failures need review and are not automatic misconduct findings.</p>
         <p>Repository access may become read-only after the deadline. This does not extend the submission cutoff.</p>
     </section>
     {% endif %}

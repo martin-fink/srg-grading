@@ -1,0 +1,13 @@
+schema_version = 1
+
+[[tests]]
+id = "hello"
+points = 10
+stdin = "Hello\n"
+stdout = "Hello\n"
+
+[[tests]]
+id = "empty"
+points = 10
+stdin = ""
+stdout = ""

@@ -1,4 +1,5 @@
 //! Restricted Kubernetes grading worker.
+mod workflow;
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use grading_core::{
@@ -6,7 +7,7 @@ use grading_core::{
     protocol::{Heartbeat, Lease, LeaseRequest, RunResult, RunStatus, TestResult},
     security::digest,
 };
-use grading_executor::{Config, job};
+use grading_executor::{Config, job, private_job, private_test_job};
 use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
 use kube::{
     Api, Client,
@@ -64,7 +65,7 @@ async fn main() -> Result<()> {
             ))
             .bearer_auth(token.trim())
             .json(&LeaseRequest {
-                profiles: config.profiles.keys().cloned().collect(),
+                profiles: config.profile_names(),
             })
             .send()
             .await?;
@@ -148,6 +149,9 @@ async fn execute(
     base: &str,
 ) -> Result<RunResult> {
     let mut result = RunResult {
+        score: None,
+        private_tests: vec![],
+        private: None,
         schema_version: 1,
         lease_token: lease.lease_token,
         run_id: lease.run_id,
@@ -204,6 +208,31 @@ async fn execute(
         tokio::fs::create_dir_all(destination.parent().context("source path")?).await?;
         write(&destination, &blob.bytes()?, blob.mode == "100755").await?;
     }
+    if let Some(baseline) = &lease.baseline {
+        ensure!(
+            chrono::Utc::now() > baseline.deadline,
+            "private grading is not open yet"
+        );
+    }
+    if lease
+        .revision
+        .grader
+        .as_ref()
+        .is_some_and(|g| g.workflow.is_some())
+    {
+        match workflow::execute(config, jobs, pods, lease, &directory).await? {
+            workflow::Outcome::Scored(score) => {
+                result.status = if score.invalidated {
+                    RunStatus::Invalidated
+                } else {
+                    RunStatus::Completed
+                };
+                result.score = Some(score);
+            }
+            workflow::Outcome::Failed(status) => result.status = status,
+        }
+        return Ok(result);
+    }
     let started = Instant::now();
     let deadline = Duration::from_secs(u64::from(lease.revision.assignment.timeout_seconds));
     for test in &lease.revision.tests.tests {
@@ -214,58 +243,20 @@ async fn execute(
         if remaining.is_zero() {
             result.status = RunStatus::TimedOut;
             result.tests.clear();
+            result.private_tests.clear();
             return Ok(result);
         }
         let definition = job(config, lease, &test.id, remaining.as_secs().max(1) as u32)?;
         let name = definition.metadata.name.as_deref().context("job name")?;
         jobs.create(&PostParams::default(), &definition).await?;
-        let (success, output) = loop {
-            if started.elapsed() >= deadline {
-                result.status = RunStatus::TimedOut;
+        let (success, output) = match wait_job(jobs, pods, name, started, deadline).await? {
+            JobOutcome::Output(success, output) => (success == 0, output),
+            JobOutcome::Failed(status) => {
+                result.status = status;
                 result.tests.clear();
+                result.private_tests.clear();
                 return Ok(result);
             }
-            let current = jobs.get(name).await?;
-            if let Some(status) = current.status {
-                if status.conditions.as_ref().is_some_and(|conditions| {
-                    conditions.iter().any(|c| {
-                        c.reason.as_deref() == Some("DeadlineExceeded") && c.status == "True"
-                    })
-                }) {
-                    result.status = RunStatus::TimedOut;
-                    result.tests.clear();
-                    return Ok(result);
-                }
-                if status.succeeded.unwrap_or(0) > 0 || status.failed.unwrap_or(0) > 0 {
-                    let list = pods
-                        .list(&ListParams::default().labels(&format!("job-name={name}")))
-                        .await?;
-                    let pod = list.items.first().context("finished job has no pod")?;
-                    let terminated = pod
-                        .status
-                        .as_ref()
-                        .and_then(|s| s.container_statuses.as_ref())
-                        .and_then(|s| s.first())
-                        .and_then(|s| s.state.as_ref())
-                        .and_then(|s| s.terminated.as_ref())
-                        .context("missing terminated process")?;
-                    if terminated.reason.as_deref() == Some("OOMKilled") {
-                        result.tests.clear();
-                        return Ok(result);
-                    }
-                    let output = pods
-                        .logs(
-                            pod.metadata.name.as_deref().context("pod name")?,
-                            &LogParams {
-                                limit_bytes: Some(65537),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
-                    break (terminated.exit_code == 0, output);
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
         };
         let passed = success && output.len() <= 65536 && output == test.stdout;
         let log = if output.len() > 65536 {
@@ -279,6 +270,86 @@ async fn execute(
             log,
         });
         jobs.delete(name, &DeleteParams::default()).await?;
+    }
+    if let Some(grader) = &lease.revision.grader
+        && lease.baseline.is_some()
+    {
+        for test in &grader.tests {
+            let input = directory.join("private-inputs").join(&test.id);
+            tokio::fs::create_dir_all(&input).await?;
+            write(&input.join("stdin"), test.stdin.as_bytes(), false).await?;
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                result.status = RunStatus::TimedOut;
+                result.tests.clear();
+                result.private_tests.clear();
+                return Ok(result);
+            }
+            let definition =
+                private_test_job(config, lease, &test.id, remaining.as_secs().max(1) as u32)?;
+            let name = definition
+                .metadata
+                .name
+                .as_deref()
+                .context("private test job name")?;
+            jobs.create(&PostParams::default(), &definition).await?;
+            match wait_job(jobs, pods, name, started, deadline).await? {
+                JobOutcome::Output(success, output) => result
+                    .private_tests
+                    .push(test.outcome(success == 0, &output)),
+                JobOutcome::Failed(status) => {
+                    result.status = status;
+                    result.tests.clear();
+                    result.private_tests.clear();
+                    return Ok(result);
+                }
+            }
+            jobs.delete(name, &DeleteParams::default()).await?;
+        }
+        let public_points = lease.baseline.as_ref().unwrap().points;
+        let public = directory.join("public");
+        tokio::fs::create_dir(&public).await?;
+        write(&public.join("results.json"), &serde_json::to_vec(&serde_json::json!({"schema_version":1,"public_points":public_points,"max_points":lease.revision.assignment.max_points,"tests":result.tests,"private_tests":result.private_tests}))?,false).await?;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            result.status = RunStatus::TimedOut;
+            result.tests.clear();
+            result.private_tests.clear();
+            return Ok(result);
+        }
+        let definition = private_job(config, lease, remaining.as_secs().max(1) as u32)?;
+        let name = definition
+            .metadata
+            .name
+            .as_deref()
+            .context("checker job name")?;
+        jobs.create(&PostParams::default(), &definition).await?;
+        let outcome = wait_job(jobs, pods, name, started, deadline).await?;
+        jobs.delete(name, &DeleteParams::default()).await?;
+        let output = match outcome {
+            JobOutcome::Output(0, output) if output.len() <= 65536 => output,
+            JobOutcome::Failed(status) => {
+                result.status = status;
+                result.tests.clear();
+                result.private_tests.clear();
+                return Ok(result);
+            }
+            _ => {
+                result.tests.clear();
+                result.private_tests.clear();
+                return Ok(result);
+            }
+        };
+        let decision: grading_core::protocol::PrivateDecision = serde_json::from_str(&output)?;
+        decision.validate(public_points, lease.revision.assignment.max_points)?;
+        let invalidated = decision.invalidated;
+        result.private = Some(decision);
+        result.status = if invalidated {
+            RunStatus::Invalidated
+        } else {
+            RunStatus::Completed
+        };
+        return Ok(result);
     }
     result.status = RunStatus::Completed;
     Ok(result)
@@ -308,4 +379,60 @@ async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+enum JobOutcome {
+    Output(i32, String),
+    Failed(RunStatus),
+}
+async fn wait_job(
+    jobs: &Api<Job>,
+    pods: &Api<Pod>,
+    name: &str,
+    started: Instant,
+    deadline: Duration,
+) -> Result<JobOutcome> {
+    loop {
+        if started.elapsed() >= deadline {
+            return Ok(JobOutcome::Failed(RunStatus::TimedOut));
+        }
+        let current = jobs.get(name).await?;
+        if let Some(status) = current.status {
+            if status.conditions.as_ref().is_some_and(|conditions| {
+                conditions
+                    .iter()
+                    .any(|c| c.reason.as_deref() == Some("DeadlineExceeded") && c.status == "True")
+            }) {
+                return Ok(JobOutcome::Failed(RunStatus::TimedOut));
+            }
+            if status.succeeded.unwrap_or(0) > 0 || status.failed.unwrap_or(0) > 0 {
+                let list = pods
+                    .list(&ListParams::default().labels(&format!("job-name={name}")))
+                    .await?;
+                let pod = list.items.first().context("finished job has no pod")?;
+                let terminated = pod
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.container_statuses.as_ref())
+                    .and_then(|s| s.first())
+                    .and_then(|s| s.state.as_ref())
+                    .and_then(|s| s.terminated.as_ref())
+                    .context("missing terminated process")?;
+                if terminated.reason.as_deref() == Some("OOMKilled") {
+                    return Ok(JobOutcome::Failed(RunStatus::InfrastructureFailed));
+                }
+                let output = pods
+                    .logs(
+                        pod.metadata.name.as_deref().context("pod name")?,
+                        &LogParams {
+                            limit_bytes: Some(65537),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                return Ok(JobOutcome::Output(terminated.exit_code, output));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }

@@ -98,6 +98,7 @@
               pkg-config
               postgresql_18
               python3
+              skopeo
               sqlx-cli
             ];
 

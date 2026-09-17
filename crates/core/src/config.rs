@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 pub struct CourseConfig {
     pub schema_version: u32,
     pub course: Course,
+    #[serde(default)]
     pub assignments: BTreeMap<String, Assignment>,
 }
 
@@ -100,7 +101,6 @@ impl CourseConfig {
             "invalid course title"
         );
         self.course.timezone.parse::<chrono_tz::Tz>()?;
-        ensure!(!self.assignments.is_empty(), "course has no assignments");
         for (id, assignment) in &self.assignments {
             ensure!(identifier(id), "invalid assignment ID");
             assignment.validate()?;
@@ -123,26 +123,15 @@ impl Assignment {
             identifier(&self.branch),
             "prototype requires a simple branch name"
         );
-        let parts: Vec<_> = self.template.split('/').collect();
         ensure!(
-            parts.len() == 2 && parts.iter().all(|p| identifier(p)),
+            github_repository(&self.template),
             "invalid template repository"
         );
         ensure!(
             valid_hex(&self.template_revision, 40),
             "template must use a full lowercase commit SHA"
         );
-        let (image, hash) = self
-            .image
-            .split_once("@sha256:")
-            .ok_or_else(|| anyhow::anyhow!("image must be digest-pinned"))?;
-        ensure!(
-            !image.is_empty()
-                && image.len() < 240
-                && !image.contains(char::is_whitespace)
-                && valid_hex(hash, 64),
-            "invalid image digest"
-        );
+        validate_image(&self.image)?;
         ensure!(
             identifier(&self.execution_profile),
             "invalid execution profile"
@@ -182,4 +171,37 @@ impl Resources {
             && self.memory_gib <= caps.memory_gib
             && self.storage_gib <= caps.storage_gib
     }
+}
+
+pub fn validate_image(value: &str) -> Result<()> {
+    let (name, hash) = value
+        .split_once("@sha256:")
+        .ok_or_else(|| anyhow::anyhow!("image must be digest-pinned"))?;
+    ensure!(
+        !name.is_empty()
+            && name
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+            && name.len() < 240
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"./:_-".contains(&b))
+            && valid_hex(hash, 64),
+        "invalid image digest"
+    );
+    Ok(())
+}
+
+pub fn github_repository(value: &str) -> bool {
+    let Some((owner, name)) = value.split_once('/') else {
+        return false;
+    };
+    identifier(owner)
+        && !name.is_empty()
+        && name.len() <= 100
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }

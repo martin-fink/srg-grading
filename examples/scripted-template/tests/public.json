@@ -1,0 +1,4 @@
+[
+  {"input": "Hello\n", "expected": "Hello\n", "points": 10},
+  {"input": "", "expected": "", "points": 10}
+]

@@ -1,0 +1,18 @@
+api_url = "https://grading-worker.example.invalid"
+token_file = "/run/secrets/worker-token"
+tls_identity_file = "/run/secrets/worker-client.pem"
+tls_ca_file = "/run/secrets/worker-ca.pem"
+namespace = "grading-sandboxes"
+runtime_class = "gvisor"
+source_pvc = "grading-source"
+staging_root = "/var/lib/grading-executor"
+
+# One registry policy for all centrally registered exercises.
+[registry]
+image_prefix = "registry.example.invalid/grading"
+timeout_seconds = 86400
+
+[registry.resources]
+cpu = 10
+memory_gib = 32
+storage_gib = 64

@@ -20,7 +20,9 @@ pub struct Config {
     pub runtime_class: String,
     pub source_pvc: String,
     pub staging_root: PathBuf,
+    #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    pub registry: Option<Registry>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -32,13 +34,34 @@ pub struct Profile {
     pub timeout_seconds: u32,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Registry {
+    pub image_prefix: String,
+    pub resources: Resources,
+    pub timeout_seconds: u32,
+}
+
 impl Config {
-    pub fn approve(&self, lease: &Lease) -> Result<&Profile> {
+    pub fn profile_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.profiles.keys().cloned().collect();
+        if self.registry.is_some() {
+            names.push("registered-v1".into());
+        }
+        names
+    }
+    pub fn approve(&self, lease: &Lease) -> Result<Profile> {
         ensure!(
             lease.schema_version == 1 && lease.revision.digest()? == lease.revision_digest,
             "lease revision mismatch"
         );
         lease.revision.validate()?;
+        if let Some(baseline) = &lease.baseline {
+            ensure!(
+                chrono::Utc::now() > baseline.deadline,
+                "private grading is not open yet"
+            );
+        }
         ensure!(
             identifier(&self.namespace)
                 && identifier(&self.runtime_class)
@@ -50,6 +73,42 @@ impl Config {
             "prototype requires a gvisor RuntimeClass"
         );
         let assignment = &lease.revision.assignment;
+        if assignment.execution_profile == "registered-v1" {
+            let registry = self
+                .registry
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("registered exercises are disabled"))?;
+            registry.resources.validate()?;
+            let prefix = format!("{}/", registry.image_prefix.trim_end_matches('/'));
+            ensure!(
+                prefix.len() > 2
+                    && registry.image_prefix.contains('/')
+                    && registry.image_prefix.bytes().all(|b| b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || b"./:_-".contains(&b)),
+                "invalid registry prefix"
+            );
+            let grader = lease
+                .revision
+                .grader
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing grader provenance"))?;
+            ensure!(
+                assignment.image.starts_with(&prefix) && grader.image.starts_with(&prefix),
+                "image outside approved registry namespace"
+            );
+            ensure!(
+                assignment.resources.fits(&registry.resources)
+                    && assignment.timeout_seconds <= registry.timeout_seconds,
+                "exercise exceeds worker caps"
+            );
+            return Ok(Profile {
+                images: vec![assignment.image.clone()],
+                command: vec!["/bin/student".into()],
+                resources: registry.resources.clone(),
+                timeout_seconds: registry.timeout_seconds,
+            });
+        }
         let profile = self
             .profiles
             .get(&assignment.execution_profile)
@@ -66,7 +125,7 @@ impl Config {
                 && profile.command.iter().all(|s| !s.contains('\0')),
             "invalid instructor command"
         );
-        Ok(profile)
+        Ok(profile.clone())
     }
 }
 
@@ -107,4 +166,133 @@ pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Res
                     {"name":"tmp","emptyDir":{"sizeLimit":"1Gi"}}]
             }}}
     }))?)
+}
+
+/// The private checker sees immutable source and public outcomes in a different Pod.
+pub fn private_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job> {
+    config.approve(lease)?;
+    let grader = lease
+        .revision
+        .grader
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing private checker"))?;
+    let mut value = serde_json::to_value(job(config, lease, "private-check", remaining)?)?;
+    let id = lease.lease_token.simple().to_string();
+    value["metadata"]["name"] = json!(format!("check-{}", &id[..16]));
+    let container = &mut value["spec"]["template"]["spec"]["containers"][0];
+    container["image"] = json!(grader.image);
+    container["command"] = json!(["/bin/grade"]);
+    container["volumeMounts"] = json!([
+        {"name":"source","mountPath":"/submission","subPath":format!("runs/{id}/source"),"readOnly":true},
+        {"name":"source","mountPath":"/public","subPath":format!("runs/{id}/public"),"readOnly":true},
+        {"name":"tmp","mountPath":"/tmp"}
+    ]);
+    Ok(serde_json::from_value(value)?)
+}
+
+/// Run one private input using the public student image, without the checker or answer.
+pub fn private_test_job(
+    config: &Config,
+    lease: &Lease,
+    test_id: &str,
+    remaining: u32,
+) -> Result<Job> {
+    let grader = lease
+        .revision
+        .grader
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing grader"))?;
+    ensure!(
+        grader.tests.iter().any(|t| t.id == test_id),
+        "unregistered private test"
+    );
+    let mut value = serde_json::to_value(job(config, lease, test_id, remaining)?)?;
+    let id = lease.lease_token.simple().to_string();
+    value["metadata"]["name"] = json!(format!("probe-{}-{test_id}", &id[..16]));
+    value["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][1]["subPath"] =
+        json!(format!("runs/{id}/private-inputs/{test_id}"));
+    Ok(serde_json::from_value(value)?)
+}
+
+/// The instructor controller can request commands but cannot select images or mount secrets.
+pub fn controller_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job> {
+    let workflow = lease
+        .revision
+        .grader
+        .as_ref()
+        .and_then(|g| g.workflow.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("missing script workflow"))?;
+    let command = if lease.baseline.is_some() {
+        workflow
+            .private_command
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing private command"))?
+    } else {
+        &workflow.public_command
+    };
+    let mut value = serde_json::to_value(private_job(config, lease, remaining)?)?;
+    let id = lease.lease_token.simple().to_string();
+    let pod = &mut value["spec"]["template"]["spec"];
+    pod["securityContext"]["runAsUser"] = json!(10004);
+    pod["securityContext"]["runAsGroup"] = json!(10004);
+    pod["securityContext"]["fsGroup"] = json!(10004);
+    pod["volumes"][0]["persistentVolumeClaim"]["readOnly"] = json!(false);
+    let container = &mut pod["containers"][0];
+    // Kubernetes combines stdout/stderr; keep diagnostics out of the score document.
+    let mut wrapped = vec![
+        "/bin/python3".to_owned(),
+        "-c".into(),
+        "import os,sys; os.dup2(os.open('/tmp/stderr',os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600),2); os.execv(sys.argv[1],sys.argv[1:])".into(),
+    ];
+    wrapped.extend(command.iter().cloned());
+    container["command"] = json!(wrapped);
+    container["resources"] = json!({"requests":{"cpu":"100m","memory":"128Mi","ephemeral-storage":"128Mi"},"limits":{"cpu":"1","memory":"512Mi","ephemeral-storage":"1Gi"}});
+    container["volumeMounts"] = json!([
+        {"name":"source","mountPath":"/submission","subPath":format!("runs/{id}/source"),"readOnly":true},
+        {"name":"source","mountPath":"/grading","subPath":format!("runs/{id}/context"),"readOnly":true},
+        {"name":"source","mountPath":"/platform","subPath":format!("runs/{id}/platform"),"readOnly":true},
+        {"name":"source","mountPath":"/control","subPath":format!("runs/{id}/control")},
+        {"name":"tmp","mountPath":"/tmp"}
+    ]);
+    Ok(serde_json::from_value(value)?)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionRequest {
+    pub id: uuid::Uuid,
+    pub command: Vec<String>,
+    pub stdin: String,
+}
+impl ExecutionRequest {
+    pub fn validate(&self) -> Result<()> {
+        grading_core::protocol::validate_command(&self.command)?;
+        ensure!(self.stdin.len() <= 65536, "execution input exceeds 64 KiB");
+        Ok(())
+    }
+}
+
+pub fn execution_job(
+    config: &Config,
+    lease: &Lease,
+    request: &ExecutionRequest,
+    remaining: u32,
+) -> Result<Job> {
+    request.validate()?;
+    let id = request.id.simple().to_string();
+    let mut value = serde_json::to_value(job(config, lease, "script", remaining)?)?;
+    value["metadata"]["name"] = json!(format!("exec-{id}"));
+    let container = &mut value["spec"]["template"]["spec"]["containers"][0];
+    let mut command = vec![
+        "/bin/sh".to_owned(),
+        "-c".into(),
+        "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin 2>/tmp/stderr"
+            .into(),
+        "grading".into(),
+    ];
+    command.extend(request.command.clone());
+    container["command"] = json!(command);
+    container["volumeMounts"][1]["subPath"] =
+        json!(format!("runs/{}/requests/{id}", lease.lease_token.simple()));
+    Ok(serde_json::from_value(value)?)
 }

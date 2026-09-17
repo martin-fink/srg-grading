@@ -24,6 +24,7 @@ hex = "0.4"
 hmac = "0.12"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 k8s-openapi = { version = "0.28", features = ["v1_34"] }
+libc = "0.2"
 kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }
 rand = "0.9"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query"] }

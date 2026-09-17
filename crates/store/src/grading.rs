@@ -85,11 +85,17 @@ pub async fn owned_lease(
         revision_digest: String,
         source_digest: String,
         definition: serde_json::Value,
+        baseline: Option<serde_json::Value>,
     }
-    let row: Row = sqlx::query_as("SELECT t.id,t.lease_token,t.lease_until,g.id AS run_id,s.sha,g.revision_digest,s.source_digest,r.definition
+    let row: Row = sqlx::query_as("SELECT t.id,t.lease_token,t.lease_until,g.id AS run_id,s.sha,g.revision_digest,s.source_digest,r.definition,
+        CASE WHEN g.public_run_id IS NULL THEN NULL ELSE jsonb_build_object('run_id',b.id,'points',COALESCE(b.public_points,b.points),'deadline',COALESCE(x.deadline,original.deadline)) END AS baseline
         FROM tasks t JOIN grading_runs g ON g.id=(t.payload->>'run_id')::uuid JOIN submissions s ON s.id=g.submission_id
         JOIN assignment_revisions r ON r.digest=g.revision_digest
-        WHERE t.id=$1 AND t.kind='grade' AND t.lease_owner=$2 AND t.lease_token=$3
+        JOIN student_repositories sr ON sr.id=s.repository_id
+        JOIN assignment_revisions original ON original.digest=sr.revision_digest
+        LEFT JOIN extensions x ON x.repository_id=sr.id
+        LEFT JOIN grading_runs b ON b.id=g.public_run_id
+        WHERE (g.public_run_id IS NULL OR COALESCE(x.deadline,original.deadline)<now()) AND t.id=$1 AND t.kind='grade' AND t.lease_owner=$2 AND t.lease_token=$3
         AND ((t.status='leased' AND t.lease_until>now()) OR ($4 AND t.status='done'))")
         .bind(task).bind(&worker.id).bind(token).bind(allow_done).fetch_one(pool).await?;
     let revision: Revision = serde_json::from_value(row.definition)?;
@@ -107,6 +113,7 @@ pub async fn owned_lease(
         "stored revision digest mismatch"
     );
     Ok(Lease {
+        baseline: row.baseline.map(serde_json::from_value).transpose()?,
         schema_version: 1,
         task_id: row.id,
         run_id: row.run_id,
@@ -163,8 +170,39 @@ pub async fn accept(
         .as_str()
         .unwrap_or("infrastructure_failed")
         .to_owned();
-    sqlx::query("UPDATE grading_runs SET status=$2,points=$3,report_digest=$4,result_digest=$5,completed_at=now() WHERE id=$1")
-        .bind(result.run_id).bind(status).bind(points).bind(report).bind(hash).execute(&mut *tx).await?;
+    let public_points = if let Some(baseline) = &lease.baseline {
+        Some(baseline.points)
+    } else if lease
+        .revision
+        .grader
+        .as_ref()
+        .is_some_and(|g| g.workflow.is_some())
+    {
+        points
+    } else {
+        matches!(result.status, grading_core::protocol::RunStatus::Completed).then(|| {
+            result
+                .tests
+                .iter()
+                .filter(|t| t.passed)
+                .map(|t| {
+                    lease
+                        .revision
+                        .tests
+                        .tests
+                        .iter()
+                        .find(|p| p.id == t.id)
+                        .expect("validated test")
+                        .points
+                })
+                .sum::<i32>()
+        })
+    };
+    sqlx::query("UPDATE grading_runs SET status=$2,points=$3,report_digest=$4,result_digest=$5,completed_at=now(),public_points=$6 WHERE id=$1")
+        .bind(result.run_id).bind(status).bind(points).bind(report).bind(hash).bind(public_points).execute(&mut *tx).await?;
+    if result.status == grading_core::protocol::RunStatus::Invalidated {
+        sqlx::query("UPDATE student_repositories SET needs_review=true WHERE id=(SELECT s.repository_id FROM submissions s JOIN grading_runs g ON g.submission_id=s.id WHERE g.id=$1)").bind(result.run_id).execute(&mut *tx).await?;
+    }
     for test in &result.tests {
         sqlx::query("INSERT INTO test_results(run_id,test_id,passed) VALUES($1,$2,$3)")
             .bind(result.run_id)
@@ -199,12 +237,12 @@ pub async fn accept(
 pub async fn enqueue_run(pool: &PgPool, submission: Uuid, regrade: bool) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
     let (repository, revision, source, closed, final_id): (Uuid,String,Option<String>,bool,Option<Uuid>) = sqlx::query_as(
-        "SELECT r.id,r.revision_digest,s.source_digest,r.closure_due,r.final_submission_id FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE s.id=$1 FOR UPDATE OF r")
+        "SELECT r.id,r.grading_revision,s.source_digest,r.closure_due,r.final_submission_id FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE s.id=$1 FOR UPDATE OF r")
         .bind(submission).fetch_one(&mut *tx).await?;
     ensure!(source.is_some(), "source is not retained yet");
     if !regrade
         && let Some(id) = sqlx::query_scalar(
-            "SELECT id FROM grading_runs WHERE submission_id=$1 ORDER BY attempt DESC LIMIT 1",
+            "SELECT id FROM grading_runs WHERE submission_id=$1 AND public_run_id IS NULL ORDER BY attempt DESC LIMIT 1",
         )
         .bind(submission)
         .fetch_optional(&mut *tx)
@@ -225,7 +263,7 @@ pub async fn enqueue_run(pool: &PgPool, submission: Uuid, regrade: bool) -> Resu
     sqlx::query("INSERT INTO grading_runs(id,submission_id,revision_digest,attempt,status) VALUES($1,$2,$3,$4,$5)")
         .bind(id).bind(submission).bind(revision).bind(attempt).bind(if superseded { "superseded" } else { "pending" }).execute(&mut *tx).await?;
     if !superseded {
-        sqlx::query("UPDATE tasks SET status='cancelled' WHERE kind='grade' AND status='pending' AND payload->>'run_id' IN (SELECT g.id::text FROM grading_runs g JOIN submissions s ON s.id=g.submission_id WHERE s.repository_id=$1 AND s.id<>$2)")
+        sqlx::query("UPDATE tasks SET status='cancelled' WHERE kind='grade' AND status='pending' AND payload->>'run_id' IN (SELECT g.id::text FROM grading_runs g JOIN submissions s ON s.id=g.submission_id WHERE s.repository_id=$1 AND s.id<>$2 AND g.public_run_id IS NULL)")
             .bind(repository).bind(submission).execute(&mut *tx).await?;
         sqlx::query("UPDATE grading_runs SET status='superseded' WHERE status='pending' AND id IN (SELECT (payload->>'run_id')::uuid FROM tasks WHERE status='cancelled' AND kind='grade')").execute(&mut *tx).await?;
         queue::enqueue(
@@ -239,4 +277,93 @@ pub async fn enqueue_run(pool: &PgPool, submission: Uuid, regrade: bool) -> Resu
     }
     tx.commit().await?;
     Ok(id)
+}
+
+/// Private grading is an explicit operator action over closed, final public submissions.
+pub async fn enqueue_private(
+    pool: &PgPool,
+    course: &str,
+    exercise: &str,
+    operator: &str,
+    reason: &str,
+) -> Result<Vec<(Uuid, Option<Uuid>, String)>> {
+    ensure!(
+        !reason.trim().is_empty(),
+        "private grading requires a reason"
+    );
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT r.id FROM student_repositories r JOIN assignments a ON a.id=r.assignment_id WHERE a.course_id=$1 AND a.slug=$2 ORDER BY r.id").bind(course).bind(exercise).fetch_all(pool).await?;
+    ensure!(!ids.is_empty(), "exercise has no student repositories");
+    let mut outcomes = Vec::new();
+    for repository in ids {
+        crate::submissions::close(pool, repository).await?;
+        let mut tx = pool.begin().await?;
+        let (revision,final_id,due):(String,Option<Uuid>,bool)=sqlx::query_as("SELECT r.grading_revision,r.final_submission_id,COALESCE(x.deadline,v.deadline)<now() FROM student_repositories r JOIN assignment_revisions v ON v.digest=r.revision_digest LEFT JOIN extensions x ON x.repository_id=r.id WHERE r.id=$1 FOR UPDATE OF r").bind(repository).fetch_one(&mut *tx).await?;
+        if !due || final_id.is_none() {
+            outcomes.push((
+                repository,
+                None,
+                if due {
+                    "No final submission"
+                } else {
+                    "Effective deadline has not passed"
+                }
+                .into(),
+            ));
+            continue;
+        }
+        let submission = final_id.unwrap();
+        let baseline:Option<(Uuid,String,Option<i32>)>=sqlx::query_as("SELECT id,status,points FROM grading_runs WHERE submission_id=$1 AND public_run_id IS NULL ORDER BY attempt DESC LIMIT 1").bind(submission).fetch_optional(&mut *tx).await?;
+        let Some((baseline, status, Some(_))) = baseline else {
+            outcomes.push((
+                repository,
+                None,
+                "Public grading must complete first".into(),
+            ));
+            continue;
+        };
+        if status != "completed" {
+            outcomes.push((
+                repository,
+                None,
+                "Public grading must complete first".into(),
+            ));
+            continue;
+        }
+        let definition: serde_json::Value =
+            sqlx::query_scalar("SELECT definition FROM assignment_revisions WHERE digest=$1")
+                .bind(&revision)
+                .fetch_one(&mut *tx)
+                .await?;
+        let definition: Revision = serde_json::from_value(definition)?;
+        ensure!(
+            definition.grader.as_ref().is_some_and(|g| g
+                .workflow
+                .as_ref()
+                .is_none_or(|w| w.private_command.is_some())),
+            "exercise has no private grading command"
+        );
+        if let Some(run)=sqlx::query_scalar("SELECT id FROM grading_runs WHERE public_run_id=$1 AND revision_digest=$2 ORDER BY attempt DESC LIMIT 1").bind(baseline).bind(&revision).fetch_optional(&mut *tx).await? {
+            outcomes.push((repository,Some(run),"Already scheduled; update the grader revision to run a correction".into()));continue;
+        }
+        let attempt: i32 = sqlx::query_scalar(
+            "SELECT COALESCE(max(attempt),0)+1 FROM grading_runs WHERE submission_id=$1",
+        )
+        .bind(submission)
+        .fetch_one(&mut *tx)
+        .await?;
+        let run = Uuid::new_v4();
+        sqlx::query("INSERT INTO grading_runs(id,submission_id,revision_digest,attempt,public_run_id) VALUES($1,$2,$3,$4,$5)").bind(run).bind(submission).bind(&revision).bind(attempt).bind(baseline).execute(&mut *tx).await?;
+        queue::enqueue(
+            &mut tx,
+            "grade",
+            json!({"run_id":run}),
+            &format!("grade:{run}"),
+            100,
+        )
+        .await?;
+        sqlx::query("INSERT INTO audit_events(operator,action,target,reason) VALUES($1,'grading.private',$2,$3)").bind(operator).bind(run.to_string()).bind(format!("{reason}; public_run={baseline}")).execute(&mut *tx).await?;
+        tx.commit().await?;
+        outcomes.push((repository, Some(run), "Queued private grading".into()));
+    }
+    Ok(outcomes)
 }

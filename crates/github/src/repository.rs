@@ -163,9 +163,8 @@ struct ApiBlob {
 }
 
 pub fn repo_path(repository: &str) -> Result<String> {
-    let parts: Vec<_> = repository.split('/').collect();
     ensure!(
-        parts.len() == 2 && parts.iter().all(|s| identifier(s)),
+        grading_core::config::github_repository(repository),
         "invalid repository name"
     );
     Ok(format!("/repos/{repository}"))
@@ -520,7 +519,9 @@ impl GitHub {
             }
         }
         let summary = match points {
-            Some(points) => format!("Official public-test points: {points}. Integrity verified."),
+            Some(points) => format!(
+                "Official points: {points}. See the portal report for public-test results and any private adjustment."
+            ),
             None => format!(
                 "Official result: {status}. No score awarded; this is not a misconduct finding."
             ),

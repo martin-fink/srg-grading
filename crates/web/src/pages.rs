@@ -26,6 +26,7 @@ pub struct AssignmentRow {
     pub status: String,
     pub sha: String,
     pub points: String,
+    pub public_points: String,
     pub run_id: String,
     pub can_create: bool,
     pub can_submit: bool,
@@ -86,12 +87,23 @@ impl From<DashboardRow> for AssignmentRow {
                 .unwrap_or_default(),
             invitation_url: row.invitation_url.unwrap_or_default(),
             state,
-            status: row
-                .status
-                .unwrap_or_else(|| "No official result".into())
-                .replace('_', " "),
+            status: format!(
+                "{}{}",
+                row.status
+                    .unwrap_or_else(|| "No official result".into())
+                    .replace('_', " "),
+                if row.private_grading {
+                    " · private grading"
+                } else {
+                    ""
+                }
+            ),
             sha: row.sha.unwrap_or_default(),
             points,
+            public_points: row
+                .public_points
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "—".into()),
             run_id: row.run_id.map(|id| id.to_string()).unwrap_or_default(),
             can_create: open && row.repository_id.is_none(),
             can_submit: open && row.state.as_deref() == Some("ready"),
@@ -126,6 +138,7 @@ pub fn preview() -> Dashboard {
                 status: "completed".into(),
                 sha: "79bf205b56a2e5042e8efdf261e2a76ce713cd46".into(),
                 points: "16 / 20".into(),
+                public_points: "16".into(),
                 run_id: String::new(),
                 can_create: false,
                 can_submit: false,
@@ -143,6 +156,7 @@ pub fn preview() -> Dashboard {
                 status: "No official result".into(),
                 sha: String::new(),
                 points: "— / 20".into(),
+                public_points: "—".into(),
                 run_id: String::new(),
                 can_create: false,
                 can_submit: false,

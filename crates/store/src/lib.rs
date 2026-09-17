@@ -1,6 +1,7 @@
 //! PostgreSQL persistence and durable work leasing.
 pub mod artifacts;
 pub mod courses;
+pub mod exercises;
 pub mod grading;
 pub mod identity;
 pub mod queue;

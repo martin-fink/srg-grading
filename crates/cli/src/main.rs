@@ -1,4 +1,5 @@
 //! Local course administration and synchronization commands.
+mod exercises;
 mod lifecycle;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -35,6 +36,10 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     Migrate,
+    Exercise {
+        #[command(subcommand)]
+        command: exercises::ExerciseCommand,
+    },
     Admin {
         #[command(subcommand)]
         command: Admin,
@@ -203,6 +208,42 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     match &args.command {
+        Command::Exercise { command } => {
+            let pool = pool(&args).await?;
+            match command {
+                exercises::ExerciseCommand::PrivateGrade {
+                    course,
+                    name,
+                    reason,
+                } => {
+                    for (repository, run, message) in
+                        grading::enqueue_private(&pool, course, name, &operator(), reason).await?
+                    {
+                        println!(
+                            "{repository}: {message}{}",
+                            run.map(|id| format!(" ({id})")).unwrap_or_default()
+                        );
+                    }
+                }
+                exercises::ExerciseCommand::Show { course, name } => {
+                    let revision = grading_store::exercises::current(&pool, course, name)
+                        .await?
+                        .context("exercise not found")?;
+                    println!("{}", serde_json::to_string_pretty(&revision)?);
+                }
+                exercises::ExerciseCommand::Add(options)
+                | exercises::ExerciseCommand::Update(options) => {
+                    exercises::register(
+                        &pool,
+                        &github(&args).await?,
+                        options,
+                        matches!(command, exercises::ExerciseCommand::Update(_)),
+                        &operator(),
+                    )
+                    .await?;
+                }
+            }
+        }
         Command::Migrate => {
             let pool = pool(&args).await?;
             grading_store::MIGRATOR.run(&pool).await?;
@@ -280,6 +321,7 @@ async fn main() -> Result<()> {
                         .bytes()?,
                 )?)?;
                 let revision = Revision {
+                    grader: None,
                     course_id: config.course.id.clone(),
                     assignment_id: id.clone(),
                     assignment: assignment.clone(),

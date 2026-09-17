@@ -58,7 +58,7 @@ and heartbeat every 30 seconds. Each worker has one live lease, and a repository
 has at most one active grading lease. Queue acquisition uses transactional locking
 and `SKIP LOCKED`; transactions end before external work starts.
 
-Before fetching/extracting source, the executor checks its local, instructor-owned
+For legacy profiles, before fetching/extracting source, the executor checks its local, instructor-owned
 allowlist of profile commands, image digests, time limits, and resource caps. It then
 verifies the source digest, SHA, and private manifest. No server-supplied command is
 executed. The local execution profile is a separate trust boundary from course data.
@@ -100,3 +100,22 @@ alternate policies, mutable images, unsupported profiles, symlinks/submodules in
 templates, and privileged/device workloads. Cross-organization installations,
 closed-assignment reopening, automatic template rollout, and automatic admission
 of unregistered SHAs are not implemented.
+
+## Registered scripts and private decisions
+
+Centrally registered exercises use [the script protocol](exercises.md). Each revision
+pins template and grader commits, student/grader image digests, script commands and
+resource caps. The executor independently checks the configured registry namespace
+and resource limits. Integrity verification precedes all script/student execution.
+
+Schema version 2 runs an instructor-owned controller with arbitrary test logic.
+It requests isolated student Jobs through a private per-lease file channel. Only
+the trusted controller's final bounded score is accepted; student outputs are data.
+The public script runs normally. A private script runs only when explicitly queued
+by `gradingctl exercise private-grade` after the effective deadline, using the final
+submission and a pinned completed public result. Extensions delay eligibility.
+
+Private runs can change points or invalidate a score, with a student-visible reason.
+Public baselines and run history remain immutable. Runtime web credentials cannot
+schedule private runs. Template updates affect future repositories; `--existing`
+rolls a grader revision into subsequent runs without changing existing student files.

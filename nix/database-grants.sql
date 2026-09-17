@@ -6,8 +6,10 @@ GRANT SELECT ON users, admins, courses, enrollments, assignments, assignment_rev
     student_repositories, extensions, submissions, submission_events, grading_runs,
     test_results, integrity_findings, grade_overrides, artifacts, workers, outbox,
     tasks, webhook_deliveries, sessions, login_states TO grading_web;
-GRANT INSERT, UPDATE ON users, student_repositories, submissions, grading_runs, tasks,
+GRANT INSERT, UPDATE ON users, student_repositories, submissions, tasks,
     artifacts, outbox TO grading_web;
+GRANT INSERT(id,submission_id,revision_digest,attempt,status),
+    UPDATE(status,points,public_points,report_digest,result_digest,completed_at) ON grading_runs TO grading_web;
 GRANT INSERT ON submission_events, webhook_deliveries, test_results, integrity_findings TO grading_web;
 GRANT INSERT, UPDATE, DELETE ON sessions, login_states TO grading_web;
 GRANT DELETE ON sessions, login_states TO grading_operator;

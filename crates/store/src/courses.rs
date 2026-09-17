@@ -159,6 +159,9 @@ pub async fn import_roster(
 
 pub async fn request_repository(pool: &PgPool, github_id: i64, assignment: Uuid) -> Result<Uuid> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(704312)")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(704315,hashtext($1))")
         .bind(format!("{github_id}:{assignment}"))
         .execute(&mut *tx)
@@ -182,7 +185,7 @@ pub async fn request_repository(pool: &PgPool, github_id: i64, assignment: Uuid)
     ensure!(now >= opens && now <= deadline, "assignment is not open");
     let id = Uuid::new_v4();
     let name = format!("submission-{}", id.simple());
-    sqlx::query("INSERT INTO student_repositories(id,enrollment_id,assignment_id,revision_digest,name,provisioning_nonce) VALUES($1,$2,$3,$4,$5,$6)")
+    sqlx::query("INSERT INTO student_repositories(id,enrollment_id,assignment_id,revision_digest,grading_revision,name,provisioning_nonce) VALUES($1,$2,$3,$4,$4,$5,$6)")
         .bind(id).bind(enrollment).bind(assignment).bind(revision).bind(name).bind(Uuid::new_v4()).execute(&mut *tx).await?;
     queue::enqueue(
         &mut tx,
@@ -245,6 +248,8 @@ pub struct DashboardRow {
     pub sha: Option<String>,
     pub status: Option<String>,
     pub points: Option<i32>,
+    pub public_points: Option<i32>,
+    pub private_grading: bool,
     pub run_id: Option<Uuid>,
     pub override_points: Option<i32>,
     pub closure_due: Option<bool>,
@@ -252,15 +257,18 @@ pub struct DashboardRow {
 
 pub async fn dashboard(pool: &PgPool, github_id: i64) -> Result<Vec<DashboardRow>> {
     Ok(sqlx::query_as(
-        "SELECT a.id AS assignment_id,c.title AS course,c.organization,c.timezone,v.definition->'assignment'->>'title' AS title,v.opens_at,COALESCE(x.deadline,v.deadline) AS deadline,v.max_points,
+        "SELECT a.id AS assignment_id,c.title AS course,c.organization,c.timezone,v.definition->'assignment'->>'title' AS title,v.opens_at,COALESCE(x.deadline,v.deadline) AS deadline,CASE WHEN o.points IS NOT NULL THEN COALESCE(gv.max_points,v.max_points) ELSE COALESCE(rv.max_points,gv.max_points,v.max_points) END AS max_points,
          r.id AS repository_id,r.name AS repository_name,r.state,r.invitation_url,r.locked_at,r.needs_review,r.last_error,r.closure_due,
-         s.sha,g.status,g.points,CASE WHEN g.report_digest IS NOT NULL THEN g.id END AS run_id,o.points AS override_points
+         s.sha,g.status,g.points,COALESCE(g.public_points,b.public_points,b.points) AS public_points,g.public_run_id IS NOT NULL AS private_grading,CASE WHEN g.report_digest IS NOT NULL THEN g.id END AS run_id,o.points AS override_points
          FROM enrollments e JOIN courses c ON c.id=e.course_id JOIN assignments a ON a.course_id=c.id
          LEFT JOIN student_repositories r ON r.enrollment_id=e.id AND r.assignment_id=a.id
          JOIN assignment_revisions v ON v.digest=COALESCE(r.revision_digest,a.current_revision)
+         LEFT JOIN assignment_revisions gv ON gv.digest=r.grading_revision
          LEFT JOIN extensions x ON x.repository_id=r.id
          LEFT JOIN LATERAL (SELECT * FROM submissions s WHERE s.repository_id=r.id AND (NOT r.closure_due OR s.id=r.final_submission_id) ORDER BY s.received_at DESC,s.id DESC LIMIT 1) s ON true
          LEFT JOIN LATERAL (SELECT * FROM grading_runs g WHERE g.submission_id=s.id ORDER BY g.attempt DESC LIMIT 1) g ON true
+         LEFT JOIN grading_runs b ON b.id=g.public_run_id
+         LEFT JOIN assignment_revisions rv ON rv.digest=g.revision_digest
          LEFT JOIN LATERAL (SELECT points FROM grade_overrides o WHERE o.repository_id=r.id ORDER BY o.created_at DESC,o.id DESC LIMIT 1) o ON true
          WHERE e.github_id=$1 ORDER BY c.id,a.slug")
         .bind(github_id).fetch_all(pool).await?)

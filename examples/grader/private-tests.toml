@@ -1,0 +1,11 @@
+schema_version = 1
+
+[[tests]]
+id = "different-input"
+stdin = "Goodbye\n"
+stdout = "Goodbye\n"
+
+[[tests]]
+id = "multiple-lines"
+stdin = "one\ntwo\nthree\n"
+stdout = "one\ntwo\nthree\n"
