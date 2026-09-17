@@ -11,12 +11,48 @@ use grading_store::{
 };
 use serde_json::json;
 use sqlx::PgPool;
+use tracing::Instrument;
 use uuid::Uuid;
 
 pub struct ContextData {
     pub pool: PgPool,
     pub github: GitHub,
     pub artifacts: Artifacts,
+}
+
+use grading_core::diagnostics::Stage;
+
+fn failure_details(error: &anyhow::Error) -> (&'static str, &'static str, Option<u16>) {
+    let stage = error
+        .downcast_ref::<Stage>()
+        .map_or("task_process", |s| s.0);
+    if let Some(status) = error.downcast_ref::<grading_github::client::ApiStatus>() {
+        return (stage, "github_http", Some(status.0));
+    }
+    if error.downcast_ref::<reqwest::Error>().is_some() {
+        return (stage, "github_transport", None);
+    }
+    for cause in error.chain() {
+        let reason = match cause.to_string().as_str() {
+            "organization base permission must be none" => "organization_base_permissions",
+            "repository inherits team access; instructor review required" => {
+                "inherited_team_access"
+            }
+            "refusing to adopt unverified repository" => "repository_ownership_or_marker",
+            "template does not match approved manifest" => "template_integrity",
+            "assignment expired before provisioning" | "assignment closed before invitation" => {
+                "assignment_closed"
+            }
+            "repository identity changed" => "repository_identity_changed",
+            "student has excessive permissions" => "excessive_student_permissions",
+            "GitHub rate limit is active" => "github_rate_limit",
+            "lease or assignment closed during seeding" => "lease_or_assignment_closed",
+            _ => continue,
+        };
+        return (stage, reason, None);
+    }
+    let details = grading_store::diagnostics(error);
+    (stage, details.reason, details.upstream_status)
 }
 
 fn payload_id(task: &Task, name: &str) -> Result<Uuid> {
@@ -39,20 +75,24 @@ pub async fn work(context: &ContextData, once: bool) -> Result<()> {
         )
         .await?
         {
+            tracing::info!(task_id=%task.id, kind=%task.kind, attempt=task.attempts, "task leased");
             let outcome = {
-                let processing = process(context, &task);
+                let processing = process(context, &task).instrument(
+                    tracing::info_span!("background_task", task_id=%task.id, kind=%task.kind),
+                );
                 tokio::pin!(processing);
                 let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
                 loop {
                     tokio::select! {
                         result=&mut processing=>break result,
-                        _=heartbeat.tick()=>{if let Err(error)=queue::heartbeat(&context.pool,task.id,task.lease_token,&owner).await {break Err(error);}}
+                        _=heartbeat.tick()=>{if let Err(error)=queue::heartbeat(&context.pool,task.id,task.lease_token,&owner).await {break Err(error.context(Stage("task_heartbeat")));}}
                     }
                 }
             };
             match outcome {
                 Ok(()) => {
                     queue::finish(&context.pool, &task).await?;
+                    tracing::info!(task_id=%task.id, kind=%task.kind, "task completed");
                     if task.kind == "provision" {
                         let repository =
                             courses::repository(&context.pool, payload_id(&task, "repository_id")?)
@@ -65,9 +105,13 @@ pub async fn work(context: &ContextData, once: bool) -> Result<()> {
                         }
                     }
                 }
-                Err(_) => {
-                    tracing::warn!(task_id=%task.id,kind=%task.kind,attempt=task.attempts,"task failed; bounded retry scheduled");
-                    queue::fail(&context.pool,&task,"External operation failed; inspect identity, permissions, limits and availability.").await?;
+                Err(error) => {
+                    let (stage, reason, upstream_status) = failure_details(&error);
+                    tracing::warn!(task_id=%task.id,kind=%task.kind,attempt=task.attempts,stage,reason,upstream_status,"task failed; bounded retry scheduled");
+                    let message = format!(
+                        "stage={stage}; reason={reason}; upstream_status={upstream_status:?}"
+                    );
+                    queue::fail(&context.pool, &task, &message).await?;
                     if let Some(retry_at) = context.github.retry_at().await {
                         sqlx::query("UPDATE tasks SET available_at=GREATEST(available_at,$2) WHERE id=$1 AND lease_token=$3 AND status='pending'").bind(task.id).bind(retry_at).bind(task.lease_token).execute(&context.pool).await?;
                     }
@@ -101,20 +145,29 @@ async fn process(context: &ContextData, task: &Task) -> Result<()> {
     };
     match task.kind.as_str() {
         "provision" => provision(context, task).await,
-        "snapshot" => snapshot(context, payload_id(task, "submission_id")?).await,
-        "publish" => publish(context, payload_id(task, "run_id")?).await,
-        "lock" => lock(context, payload_id(task, "repository_id")?).await,
+        "snapshot" => snapshot(context, payload_id(task, "submission_id")?)
+            .await
+            .context(Stage("submission_snapshot")),
+        "publish" => publish(context, payload_id(task, "run_id")?)
+            .await
+            .context(Stage("check_publish")),
+        "lock" => lock(context, payload_id(task, "repository_id")?)
+            .await
+            .context(Stage("repository_lock")),
         _ => anyhow::bail!("unsupported control task"),
     }
 }
 
 async fn provision(context: &ContextData, task: &Task) -> Result<()> {
     let id = payload_id(task, "repository_id")?;
-    let repository = courses::repository(&context.pool, id).await?;
+    let repository = courses::repository(&context.pool, id)
+        .await
+        .context(Stage("repository_load"))?;
     if repository.state == "ready" {
         return Ok(());
     }
-    let revision: Revision = serde_json::from_value(repository.definition.clone())?;
+    let revision: Revision =
+        serde_json::from_value(repository.definition.clone()).context(Stage("revision_decode"))?;
     let full_name = format!("{}/{}", repository.organization, repository.name);
     if repository.state == "creating" {
         ensure!(
@@ -127,7 +180,8 @@ async fn provision(context: &ContextData, task: &Task) -> Result<()> {
                 &revision.assignment.template,
                 &revision.assignment.template_revision,
             )
-            .await?;
+            .await
+            .context(Stage("template_fetch"))?;
         ensure!(
             revision.manifest.check(&source)?.is_empty(),
             "template does not match approved manifest"
@@ -139,7 +193,8 @@ async fn provision(context: &ContextData, task: &Task) -> Result<()> {
                 &repository.name,
                 repository.provisioning_nonce,
             )
-            .await?;
+            .await
+            .context(Stage("repository_create"))?;
         ensure!(
             repository.github_repo_id.is_none_or(|id| id == created.id),
             "repository identity changed"
@@ -148,12 +203,15 @@ async fn provision(context: &ContextData, task: &Task) -> Result<()> {
         context
             .github
             .seed(&full_name, &revision.assignment.branch, &source)
-            .await?;
+            .await
+            .context(Stage("repository_seed"))?;
         let updated=sqlx::query("UPDATE student_repositories SET state='invitation_pending',last_error=NULL WHERE id=$1 AND NOT closure_due AND EXISTS(SELECT 1 FROM tasks WHERE id=$2 AND lease_token=$3 AND status='leased' AND lease_until>now())")
             .bind(id).bind(task.id).bind(task.lease_token).execute(&context.pool).await?.rows_affected();
         ensure!(updated == 1, "lease or assignment closed during seeding");
     }
-    let repository = courses::repository(&context.pool, id).await?;
+    let repository = courses::repository(&context.pool, id)
+        .await
+        .context(Stage("repository_load"))?;
     ensure!(
         !repository.closure_due && Utc::now() <= repository.deadline,
         "assignment closed before invitation"
@@ -164,16 +222,23 @@ async fn provision(context: &ContextData, task: &Task) -> Result<()> {
             &full_name,
             repository.github_repo_id.context("missing repository ID")?,
         )
-        .await?;
-    context.github.verify_no_teams(&full_name).await?;
+        .await
+        .context(Stage("repository_verify"))?;
+    context
+        .github
+        .verify_no_teams(&full_name)
+        .await
+        .context(Stage("team_permissions"))?;
     let invitation = context
         .github
         .invite(&full_name, repository.github_id)
-        .await?;
+        .await
+        .context(Stage("student_invitation"))?;
     let permission = context
         .github
         .permission(&full_name, repository.github_id)
-        .await?;
+        .await
+        .context(Stage("student_permissions"))?;
     ensure!(
         permission == "none" || permission == "read" || permission == "write",
         "student has excessive permissions"
@@ -282,11 +347,14 @@ async fn sync_inner(context: &ContextData) -> Result<()> {
         .fetch_all(&context.pool)
         .await?;
     for id in ids {
-        let result = observe(context, id).await;
+        let result = observe(context, id)
+            .instrument(tracing::info_span!("repository_sync", repository_id=%id))
+            .await;
         sqlx::query("INSERT INTO reconciliation_observations(repository_id,success,detail) VALUES($1,$2,$3)")
             .bind(id).bind(result.is_ok()).bind(if result.is_ok(){"Identity, branch and permissions observed"}else{"Observation failed; retry required"}).execute(&context.pool).await?;
-        if result.is_err() {
-            tracing::warn!(repository_id=%id,"repository sync observation failed");
+        if let Err(error) = &result {
+            let (stage, reason, upstream_status) = failure_details(error);
+            tracing::warn!(repository_id=%id, stage, reason, upstream_status, "repository sync observation failed");
         }
         submissions::close(&context.pool, id).await?;
     }
@@ -363,4 +431,32 @@ async fn observe(context: &ContextData, id: Uuid) -> Result<()> {
         "excessive effective permissions"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn failures_keep_stages_and_status_without_raw_error_text() {
+        let error = anyhow::Error::new(grading_github::client::ApiStatus(403))
+            .context("SECRET URL and response")
+            .context(Stage("repository_create"));
+        assert_eq!(
+            failure_details(&error),
+            ("repository_create", "github_http", Some(403))
+        );
+        let error = anyhow::anyhow!("organization base permission must be none")
+            .context(Stage("repository_create"));
+        assert_eq!(
+            failure_details(&error),
+            ("repository_create", "organization_base_permissions", None)
+        );
+        let error =
+            anyhow::anyhow!("SECRET credential and source code").context(Stage("template_fetch"));
+        assert_eq!(
+            failure_details(&error),
+            ("template_fetch", "validation_or_internal", None)
+        );
+    }
 }

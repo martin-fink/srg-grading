@@ -1,6 +1,7 @@
 //! Private per-run file channel between instructor scripts and isolated student Jobs.
 use crate::{JobOutcome, wait_job, write};
 use anyhow::{Context, Result, ensure};
+use grading_core::diagnostics::Stage;
 use grading_core::protocol::{Lease, RunStatus, ScriptScore};
 use grading_executor::{Config, ExecutionRequest, controller_job, execution_job};
 use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
@@ -66,7 +67,9 @@ pub async fn execute(
         .name
         .as_deref()
         .context("controller job name")?;
-    jobs.create(&PostParams::default(), &job).await?;
+    jobs.create(&PostParams::default(), &job)
+        .await
+        .context(Stage("controller_job_create"))?;
     let outcome = tokio::select! {
         outcome=wait_job(jobs,pods,name,started,deadline)=>outcome?,
         result=serve(config,jobs,pods,lease,directory,started,deadline)=>{return Ok(Outcome::Failed(result?));}
@@ -78,8 +81,11 @@ pub async fn execute(
         _ => return Ok(Outcome::Failed(RunStatus::InfrastructureFailed)),
     };
     ensure!(output.len() <= 65536, "script result exceeds limit");
-    let result: ScriptScore = serde_json::from_str(&output)?;
-    result.validate(lease.revision.assignment.max_points, baseline)?;
+    let result: ScriptScore =
+        serde_json::from_str(&output).context(Stage("grader_result_decode"))?;
+    result
+        .validate(lease.revision.assignment.max_points, baseline)
+        .context(Stage("grader_result_validate"))?;
     Ok(Outcome::Scored(result))
 }
 
@@ -95,8 +101,11 @@ async fn serve(
     let mut handled = HashMap::new();
     loop {
         if let Some(bytes) = read_request(&directory.join("control/request.json"))? {
-            let request: ExecutionRequest = serde_json::from_slice(&bytes)?;
-            request.validate()?;
+            let request: ExecutionRequest =
+                serde_json::from_slice(&bytes).context(Stage("workflow_request_decode"))?;
+            request
+                .validate()
+                .context(Stage("workflow_request_validate"))?;
             let digest = grading_core::security::digest(&bytes);
             if let Some(previous) = handled.get(&request.id) {
                 ensure!(previous == &digest, "conflicting execution request replay");
@@ -121,7 +130,9 @@ async fn serve(
                     .name
                     .as_deref()
                     .context("execution job name")?;
-                jobs.create(&PostParams::default(), &definition).await?;
+                jobs.create(&PostParams::default(), &definition)
+                    .await
+                    .context(Stage("student_job_create"))?;
                 let outcome = wait_job(jobs, pods, name, started, deadline).await?;
                 jobs.delete(name, &DeleteParams::default()).await?;
                 let (exit_code, mut stdout) = match outcome {

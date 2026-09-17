@@ -247,12 +247,13 @@ pub async fn prepare(
     );
     let shared = definition.schema_version == 3;
     if !shared {
-        text_file(&grader_source, "flake.nix")?;
-        text_file(&grader_source, "flake.lock")?;
         ensure!(
             args.runner_image.is_none(),
-            "--runner-image requires exercise schema 3"
+            "{grader}@{grader_sha}: exercise.toml declares schema {}; --runner-image requires schema 3 in the GRADER repository (not the local exercise catalog). Use examples/shared-grader, including its scripts and /grader workflow commands, then commit/push it and select that commit with grader_ref. Changing only the schema number is insufficient for legacy image commands.",
+            definition.schema_version
         );
+        text_file(&grader_source, "flake.nix")?;
+        text_file(&grader_source, "flake.lock")?;
     }
     let scripted = definition.schema_version >= 2;
     ensure!(

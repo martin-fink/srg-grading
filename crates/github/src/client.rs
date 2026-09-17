@@ -1,6 +1,7 @@
 //! Bounded GitHub API transport, installation tokens, and PKCE login exchange.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
+use grading_core::diagnostics::Stage;
 use grading_core::{config::identifier, security::pkce};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, Method, StatusCode, Url};
@@ -8,6 +9,40 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+
+fn api_operation(path: &str) -> &'static str {
+    if path.contains("/git/blobs") {
+        "git_blob"
+    } else if path.contains("/git/trees") {
+        "git_tree"
+    } else if path.contains("/git/commits") {
+        "git_commit"
+    } else if path.contains("/git/refs") {
+        "git_ref"
+    } else if path.contains("/branches/") {
+        "branch_lookup"
+    } else if path.contains("/actions/") {
+        "actions_configuration"
+    } else if path.contains("/collaborators/") {
+        "collaborator_access"
+    } else if path.contains("/invitations") {
+        "repository_invitation"
+    } else if path.ends_with("/teams") || path.contains("/teams?") {
+        "repository_teams"
+    } else if path.contains("/check-runs") {
+        "github_check"
+    } else if path.starts_with("/orgs/") && path.ends_with("/repos") {
+        "repository_create"
+    } else if path.starts_with("/orgs/") {
+        "organization_lookup"
+    } else if path.starts_with("/repos/") {
+        "repository_lookup"
+    } else if path.starts_with("/user") {
+        "account_lookup"
+    } else {
+        "github_api"
+    }
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +77,8 @@ struct InstallationToken {
     value: String,
     expires_at: DateTime<Utc>,
 }
+
+pub use grading_core::diagnostics::HttpStatus as ApiStatus;
 
 /// Carries only an allowlisted stage, never upstream errors or authentication data.
 #[derive(Debug)]
@@ -239,11 +276,9 @@ impl GitHub {
 
     pub async fn empty(&self, method: Method, path: &str, body: Option<Value>) -> Result<()> {
         let response = self.response(method, path, body).await?;
-        ensure!(
-            response.status().is_success(),
-            "GitHub API returned HTTP {}",
-            response.status()
-        );
+        if !response.status().is_success() {
+            return Err(ApiStatus(response.status().as_u16()).into());
+        }
         Ok(())
     }
 
@@ -253,6 +288,8 @@ impl GitHub {
         path: &str,
         body: Option<Value>,
     ) -> Result<reqwest::Response> {
+        let operation = api_operation(path);
+        let started = std::time::Instant::now();
         if self.retry_at().await.is_some_and(|at| at > Utc::now()) {
             anyhow::bail!("GitHub rate limit is active");
         }
@@ -260,16 +297,51 @@ impl GitHub {
             path.starts_with('/') && !path.contains("..") && !path.contains('#'),
             "invalid GitHub API path"
         );
+        let token = self.installation_token().await.map_err(|error| {
+            let details = grading_core::diagnostics::describe(&error);
+            tracing::warn!(
+                stage = "github_app_authentication",
+                reason = details.reason,
+                upstream_status = details.upstream_status,
+                "GitHub App authentication failed"
+            );
+            error.context(Stage("github_app_authentication"))
+        })?;
         let mut request = self
             .http
             .request(method, format!("{}{path}", self.api_origin))
-            .bearer_auth(self.installation_token().await?)
+            .bearer_auth(token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await.context("GitHub transport failed")?;
+        let response = request.send().await.map_err(|error| {
+            tracing::warn!(
+                operation,
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                "GitHub transport failed"
+            );
+            anyhow::Error::new(error).context(Stage("github_transport"))
+        })?;
+        let status = response.status().as_u16();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
+            tracing::warn!(
+                operation,
+                upstream_status = status,
+                elapsed_ms,
+                "GitHub API rejected operation"
+            );
+        } else {
+            tracing::debug!(
+                operation,
+                upstream_status = status,
+                elapsed_ms,
+                "GitHub API response"
+            );
+        }
         if response.status() == StatusCode::TOO_MANY_REQUESTS
             || (response.status() == StatusCode::FORBIDDEN
                 && response
@@ -402,7 +474,9 @@ fn parse_login_token(status: StatusCode, bytes: &[u8]) -> Result<String, LoginEr
 }
 
 pub async fn bounded_bytes(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    ensure!(response.status().is_success(), "HTTP {}", response.status());
+    if !response.status().is_success() {
+        return Err(ApiStatus(response.status().as_u16()).into());
+    }
     ensure!(
         response.content_length().is_none_or(|n| n <= limit as u64),
         "response too large"

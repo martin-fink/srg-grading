@@ -154,3 +154,25 @@ Restore into separate database/artifact storage, reapply grants, and verify ever
 referenced digest before starting an isolated restored application. `just test`
 exercises local PostgreSQL dump/restore and artifact hashes; it does not prove the
 external Borg archive can be recovered. Perform that restore drill before the pilot.
+
+## Diagnosing failures
+
+The web service, `gradingctl work`/`sync`, and executor write structured diagnostics
+to stderr. Failures include a static `stage`, a safe `reason`, and an upstream HTTP
+status when available. Background tasks include task IDs and attempt numbers;
+grading executions include run IDs. Provisioning stages distinguish template
+fetching, repository creation/seeding, permission checks, and invitations. Inspect
+the service running `gradingctl work` when repository creation needs attention.
+
+HTTP requests receive a generated `x-request-id` response header. At the default
+`info` level, request spans correlate this ID with handler errors and the final
+status/latency. Routes are logged as patterns, never actual URLs or query strings.
+For more detail, set `RUST_LOG=grading_web=debug,gradingctl=debug,grading_executor=debug,grading_github=debug,grading_store=debug`
+on the relevant service. HTTP/SQL dependency tracing is disabled to prevent
+verbose library logs from exposing credentials or data.
+
+Logs do not include raw error chains, upstream response bodies, tokens, cookies,
+rosters, source files, or private grader output. Interactive CLI validation errors
+and preview/export output remain operator-facing and may contain private data.
+After deploying logging changes, restart the web service, background worker, and
+executor. No database migration is needed for these logging changes.

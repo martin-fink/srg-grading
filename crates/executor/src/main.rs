@@ -2,6 +2,7 @@
 mod workflow;
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
+use grading_core::diagnostics::{HttpStatus, Stage};
 use grading_core::{
     integrity::{MAX_SNAPSHOT_BYTES, Snapshot},
     protocol::{Heartbeat, Lease, LeaseRequest, RunResult, RunStatus, TestResult},
@@ -19,6 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::io::AsyncWriteExt;
+use tracing::Instrument;
 
 #[derive(Parser)]
 struct Args {
@@ -28,19 +30,70 @@ struct Args {
     once: bool,
 }
 
+fn log_failure(stage: &'static str, error: &anyhow::Error) {
+    let mut details = grading_core::diagnostics::describe(error);
+    if let Some(kube::Error::Api(response)) = error.downcast_ref::<kube::Error>() {
+        details.reason = "kubernetes_api";
+        details.upstream_status = Some(response.code);
+    } else if error.downcast_ref::<kube::Error>().is_some() {
+        details.reason = "kubernetes_client";
+    } else if let Some(http) = error.downcast_ref::<reqwest::Error>() {
+        details.reason = if http.is_timeout() {
+            "http_timeout"
+        } else {
+            "http_transport"
+        };
+    }
+    let stage = if details.stage == "unspecified" {
+        stage
+    } else {
+        details.stage
+    };
+    tracing::warn!(
+        stage,
+        reason = details.reason,
+        upstream_status = details.upstream_status,
+        "executor operation failed"
+    );
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into())
+                .add_directive("reqwest=off".parse().unwrap())
+                .add_directive("hyper=off".parse().unwrap())
+                .add_directive("hyper_util=off".parse().unwrap())
+                .add_directive("kube_client=off".parse().unwrap()),
+        )
         .init();
-    let args = Args::parse();
-    let config: Config = toml::from_str(&tokio::fs::read_to_string(args.config).await?)?;
-    let url = reqwest::Url::parse(&config.api_url)?;
+    match run(Args::parse()).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            log_failure("executor_startup_or_poll", &error);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<()> {
+    let config: Config = toml::from_str(
+        &tokio::fs::read_to_string(args.config)
+            .await
+            .context(Stage("executor_config_read"))?,
+    )
+    .context(Stage("executor_config_parse"))?;
+    let url = reqwest::Url::parse(&config.api_url).context(Stage("executor_api_url"))?;
     ensure!(
         url.scheme() == "https" && url.query().is_none() && url.fragment().is_none(),
         "worker API requires HTTPS"
     );
-    let token = tokio::fs::read_to_string(&config.token_file).await?;
+    let token = tokio::fs::read_to_string(&config.token_file)
+        .await
+        .context(Stage("worker_credentials_read"))?;
     let mut http = HttpClient::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none());
@@ -53,10 +106,15 @@ async fn main() -> Result<()> {
         )?);
     }
     let http = http.build()?;
-    let client = Client::try_default().await?;
+    let client = Client::try_default()
+        .await
+        .context(Stage("kubernetes_client_init"))?;
     let jobs: Api<Job> = Api::namespaced(client.clone(), &config.namespace);
     let pods: Api<Pod> = Api::namespaced(client, &config.namespace);
-    tokio::fs::create_dir_all(&config.staging_root).await?;
+    tokio::fs::create_dir_all(&config.staging_root)
+        .await
+        .context(Stage("staging_root_create"))?;
+    tracing::info!("executor polling started");
     loop {
         let response = http
             .post(format!(
@@ -68,16 +126,22 @@ async fn main() -> Result<()> {
                 profiles: config.profile_names(),
             })
             .send()
-            .await?;
-        let lease: Option<Lease> =
-            serde_json::from_slice(&bounded(response, 2 * 1024 * 1024).await?)?;
+            .await
+            .context(Stage("lease_request"))?;
+        let lease: Option<Lease> = serde_json::from_slice(
+            &bounded(response, 2 * 1024 * 1024)
+                .await
+                .context(Stage("lease_response"))?,
+        )
+        .context(Stage("lease_decode"))?;
         if let Some(lease) = lease {
             let base = format!(
                 "{}/internal/tasks/{}",
                 config.api_url.trim_end_matches('/'),
                 lease.task_id
             );
-            let execution = execute(&config, &http, token.trim(), &jobs, &pods, &lease, &base);
+            tracing::info!(task_id=%lease.task_id, run_id=%lease.run_id, private=lease.baseline.is_some(), "grading lease acquired");
+            let execution = execute(&config, &http, token.trim(), &jobs, &pods, &lease, &base).instrument(tracing::info_span!("grading_run", task_id=%lease.task_id, run_id=%lease.run_id));
             tokio::pin!(execution);
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             let outcome = loop {
@@ -85,28 +149,42 @@ async fn main() -> Result<()> {
                     result=&mut execution=>break result,
                     _=interval.tick()=>{
                         let heartbeat=http.post(format!("{base}/heartbeat")).bearer_auth(token.trim()).json(&Heartbeat{lease_token:lease.lease_token}).send().await;
-                        if !heartbeat.is_ok_and(|r|r.status().is_success()){break Err(anyhow::anyhow!("lease heartbeat lost"));}
+                        match heartbeat {
+                            Ok(response) if response.status().is_success() => {},
+                            Ok(response) => { tracing::warn!(task_id=%lease.task_id, stage="lease_heartbeat", upstream_status=response.status().as_u16(), "heartbeat rejected"); break Err(anyhow::anyhow!("lease heartbeat lost")); },
+                            Err(error) => { log_failure("lease_heartbeat", &error.into()); break Err(anyhow::anyhow!("lease heartbeat lost")); }
+                        }
                     }
                 }
             };
             let selector = ListParams::default()
                 .labels(&format!("grading-lease={}", lease.lease_token.simple()));
-            let _ = jobs
+            if let Err(error) = jobs
                 .delete_collection(&DeleteParams::default(), &selector)
-                .await;
+                .await
+            {
+                log_failure("kubernetes_cleanup", &error.into());
+            }
             match outcome {
                 Ok(result) => {
+                    tracing::info!(task_id=%lease.task_id, run_id=%lease.run_id, status=?result.status, "grading execution finished");
                     let mut accepted = false;
-                    for _ in 0..3 {
+                    for attempt in 1..=3 {
                         let response = http
                             .post(format!("{base}/result"))
                             .bearer_auth(token.trim())
                             .json(&result)
                             .send()
                             .await;
-                        if response.is_ok_and(|r| r.status().is_success()) {
-                            accepted = true;
-                            break;
+                        match response {
+                            Ok(response) if response.status().is_success() => {
+                                accepted = true;
+                                break;
+                            }
+                            Ok(response) => {
+                                tracing::warn!(task_id=%lease.task_id, stage="result_publish", attempt, upstream_status=response.status().as_u16(), "result rejected")
+                            }
+                            Err(error) => log_failure("result_publish", &error.into()),
                         }
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
@@ -114,19 +192,25 @@ async fn main() -> Result<()> {
                         tracing::warn!(task_id=%lease.task_id,"result not accepted; lease will expire");
                     }
                 }
-                Err(_) => {
-                    tracing::warn!(task_id=%lease.task_id,"execution interrupted; lease will expire");
+                Err(error) => {
+                    let span = tracing::info_span!("grading_run", task_id=%lease.task_id, run_id=%lease.run_id);
+                    let _entered = span.enter();
+                    log_failure("grading_execute", &error);
                 }
             }
-            if let Ok(remaining) = pods.list(&selector).await
-                && remaining.items.is_empty()
-            {
+            let remaining = pods.list(&selector).await;
+            if remaining.is_err() {
+                tracing::warn!(task_id=%lease.task_id, stage="kubernetes_cleanup_status", "could not verify sandbox cleanup; retaining staged files");
+            }
+            if remaining.is_ok_and(|remaining| remaining.items.is_empty()) {
                 let directory = config
                     .staging_root
                     .join("runs")
                     .join(lease.lease_token.simple().to_string());
                 if directory.exists() {
-                    tokio::fs::remove_dir_all(directory).await?;
+                    tokio::fs::remove_dir_all(directory)
+                        .await
+                        .context(Stage("staging_cleanup"))?;
                 }
             }
         } else if !args.once {
@@ -163,7 +247,8 @@ async fn execute(
         tests: vec![],
         findings: vec![],
     };
-    if config.approve(lease).is_err() {
+    if let Err(error) = config.approve(lease) {
+        log_failure("lease_approval", &error);
         return Ok(result);
     }
     let response = http
@@ -175,13 +260,15 @@ async fn execute(
     let bytes = bounded(response, MAX_SNAPSHOT_BYTES * 2).await?;
     ensure!(
         digest(&bytes) == lease.source_digest,
-        "source digest mismatch"
+        Stage("submission_digest_verify")
     );
-    let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
-    ensure!(snapshot.sha == lease.sha, "snapshot SHA mismatch");
+    let snapshot: Snapshot =
+        serde_json::from_slice(&bytes).context(Stage("submission_snapshot_decode"))?;
+    ensure!(snapshot.sha == lease.sha, Stage("submission_commit_verify"));
     let findings = match lease.revision.manifest.check(&snapshot) {
         Ok(findings) => findings,
-        Err(_) => {
+        Err(error) => {
+            log_failure("submission_integrity", &error);
             result.status = RunStatus::IntegrityFailed;
             result.findings.push(grading_core::integrity::Finding {
                 path: "(snapshot)".into(),
@@ -191,6 +278,11 @@ async fn execute(
         }
     };
     if !findings.is_empty() {
+        tracing::info!(
+            stage = "submission_integrity",
+            findings = findings.len(),
+            "integrity check failed"
+        );
         result.status = RunStatus::IntegrityFailed;
         result.findings = findings;
         return Ok(result);
@@ -200,7 +292,9 @@ async fn execute(
         .join("runs")
         .join(lease.lease_token.simple().to_string());
     tokio::fs::create_dir_all(directory.parent().context("staging path")?).await?;
-    tokio::fs::create_dir(&directory).await?;
+    tokio::fs::create_dir(&directory)
+        .await
+        .context(Stage("staging_directory_create"))?;
     if let Some(grader) = &lease.revision.grader
         && let Some(expected) = &grader.source_digest
     {
@@ -211,13 +305,15 @@ async fn execute(
             .send()
             .await?;
         let bytes = bounded(response, MAX_SNAPSHOT_BYTES * 2).await?;
-        ensure!(
-            &digest(&bytes) == expected,
-            "grader snapshot digest mismatch"
-        );
+        ensure!(&digest(&bytes) == expected, Stage("grader_digest_verify"));
         let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
-        ensure!(snapshot.sha == grader.revision, "grader commit mismatch");
-        snapshot.validate()?;
+        ensure!(
+            snapshot.sha == grader.revision,
+            Stage("grader_commit_verify")
+        );
+        snapshot
+            .validate()
+            .context(Stage("grader_snapshot_validate"))?;
         let root = directory.join("grader");
         tokio::fs::create_dir(&root).await?;
         #[cfg(unix)]
@@ -276,7 +372,9 @@ async fn execute(
         }
         let definition = job(config, lease, &test.id, remaining.as_secs().max(1) as u32)?;
         let name = definition.metadata.name.as_deref().context("job name")?;
-        jobs.create(&PostParams::default(), &definition).await?;
+        jobs.create(&PostParams::default(), &definition)
+            .await
+            .context(Stage("student_job_create"))?;
         let (success, output) = match wait_job(jobs, pods, name, started, deadline).await? {
             JobOutcome::Output(success, output) => (success == 0, output),
             JobOutcome::Failed(status) => {
@@ -320,7 +418,9 @@ async fn execute(
                 .name
                 .as_deref()
                 .context("private test job name")?;
-            jobs.create(&PostParams::default(), &definition).await?;
+            jobs.create(&PostParams::default(), &definition)
+                .await
+                .context(Stage("student_job_create"))?;
             match wait_job(jobs, pods, name, started, deadline).await? {
                 JobOutcome::Output(success, output) => result
                     .private_tests
@@ -351,7 +451,9 @@ async fn execute(
             .name
             .as_deref()
             .context("checker job name")?;
-        jobs.create(&PostParams::default(), &definition).await?;
+        jobs.create(&PostParams::default(), &definition)
+            .await
+            .context(Stage("student_job_create"))?;
         let outcome = wait_job(jobs, pods, name, started, deadline).await?;
         jobs.delete(name, &DeleteParams::default()).await?;
         let output = match outcome {
@@ -394,10 +496,9 @@ async fn write(path: &Path, bytes: &[u8], executable: bool) -> Result<()> {
 }
 
 async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    ensure!(
-        response.status().is_success(),
-        "worker API rejected request"
-    );
+    if !response.status().is_success() {
+        return Err(HttpStatus(response.status().as_u16()).into());
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         ensure!(
@@ -422,22 +523,27 @@ async fn wait_job(
 ) -> Result<JobOutcome> {
     loop {
         if started.elapsed() >= deadline {
+            tracing::warn!(stage = "execution_deadline", "grading time limit exceeded");
             return Ok(JobOutcome::Failed(RunStatus::TimedOut));
         }
-        let current = jobs.get(name).await?;
+        let current = jobs
+            .get(name)
+            .await
+            .context(Stage("kubernetes_job_status"))?;
         if let Some(status) = current.status {
             if status.conditions.as_ref().is_some_and(|conditions| {
                 conditions
                     .iter()
                     .any(|c| c.reason.as_deref() == Some("DeadlineExceeded") && c.status == "True")
             }) {
+                tracing::warn!(stage = "execution_deadline", "grading time limit exceeded");
                 return Ok(JobOutcome::Failed(RunStatus::TimedOut));
             }
             if status.succeeded.unwrap_or(0) > 0 || status.failed.unwrap_or(0) > 0 {
                 let list = pods
                     .list(&ListParams::default().labels(&format!("job-name={name}")))
                     .await?;
-                let pod = list.items.first().context("finished job has no pod")?;
+                let pod = list.items.first().context(Stage("sandbox_pod_lookup"))?;
                 let terminated = pod
                     .status
                     .as_ref()
@@ -445,8 +551,13 @@ async fn wait_job(
                     .and_then(|s| s.first())
                     .and_then(|s| s.state.as_ref())
                     .and_then(|s| s.terminated.as_ref())
-                    .context("missing terminated process")?;
+                    .context(Stage("sandbox_termination_status"))?;
                 if terminated.reason.as_deref() == Some("OOMKilled") {
+                    tracing::warn!(
+                        stage = "sandbox_execution",
+                        reason = "oom_killed",
+                        "sandbox exceeded memory limit"
+                    );
                     return Ok(JobOutcome::Failed(RunStatus::InfrastructureFailed));
                 }
                 let output = pods
@@ -458,6 +569,11 @@ async fn wait_job(
                         },
                     )
                     .await?;
+                tracing::debug!(
+                    stage = "sandbox_execution",
+                    exit_code = terminated.exit_code,
+                    "sandbox process completed"
+                );
                 return Ok(JobOutcome::Output(terminated.exit_code, output));
             }
         }

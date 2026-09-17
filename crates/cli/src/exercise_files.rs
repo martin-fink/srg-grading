@@ -61,8 +61,14 @@ fn merge(files: Vec<File>) -> Result<BTreeMap<String, BTreeMap<String, Entry>>> 
     let mut courses: BTreeMap<String, BTreeMap<String, Entry>> = BTreeMap::new();
     for file in files {
         ensure!(
-            file.schema_version == 1 && identifier(&file.course),
-            "invalid exercise catalog schema/course"
+            file.schema_version == 1,
+            "local exercise catalog schema_version must be 1, got {}; schema 3 belongs in the grader repository's exercise.toml",
+            file.schema_version
+        );
+        ensure!(
+            identifier(&file.course),
+            "invalid course ID {:?}: use 1–80 ASCII letters, digits, hyphens or underscores, matching course.id in the course file",
+            file.course
         );
         let entries = courses.entry(file.course.clone()).or_default();
         for (name, mut entry) in file.exercises {

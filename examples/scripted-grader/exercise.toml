@@ -1,3 +1,4 @@
+# LEGACY image-building example. For --runner-image use examples/shared-grader/.
 schema_version = 2
 title = "C echo exercise"
 branch = "main"

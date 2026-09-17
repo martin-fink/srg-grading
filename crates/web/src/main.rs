@@ -1,6 +1,7 @@
 //! Server-rendered grading portal and narrow executor API.
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
+use grading_core::diagnostics::Stage;
 use grading_web::routes::{self, AppState};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
@@ -25,11 +26,38 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    let mut filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    for directive in [
+        "reqwest=off",
+        "hyper=off",
+        "hyper_util=off",
+        "sqlx=off",
+        "tower_http=off",
+    ] {
+        filter = filter.add_directive(directive.parse().unwrap());
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
         .init();
-    let args = Args::parse();
+    match run(Args::parse()).await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            let details = grading_store::diagnostics(&error);
+            tracing::error!(
+                stage = details.stage,
+                reason = details.reason,
+                upstream_status = details.upstream_status,
+                "web service terminated"
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<()> {
     if args.preview {
         ensure!(
             args.listen.ip().is_loopback(),
@@ -37,7 +65,9 @@ async fn main() -> Result<()> {
         );
         tracing::info!(address=%args.listen,"starting design preview");
         axum::serve(
-            tokio::net::TcpListener::bind(args.listen).await?,
+            tokio::net::TcpListener::bind(args.listen)
+                .await
+                .context(Stage("public_listener_bind"))?,
             routes::preview_router(),
         )
         .with_graceful_shutdown(shutdown())
@@ -53,12 +83,14 @@ async fn main() -> Result<()> {
     let github = grading_github::GitHub::from_file(
         &args.github_config.context("--github-config is required")?,
     )
-    .await?;
+    .await
+    .context(Stage("github_configuration"))?;
     let secret = tokio::fs::read(
         args.webhook_secret_file
             .context("--webhook-secret-file is required")?,
     )
-    .await?;
+    .await
+    .context(Stage("webhook_secret_read"))?;
     ensure!(
         secret.len() >= 32,
         "webhook secret must have at least 32 bytes"
@@ -78,8 +110,12 @@ async fn main() -> Result<()> {
         webhook_secret: Arc::new(secret),
         public_origin: public_url.origin().ascii_serialization(),
     };
-    let public = tokio::net::TcpListener::bind(args.listen).await?;
-    let internal = tokio::net::TcpListener::bind(args.internal_listen).await?;
+    let public = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .context(Stage("public_listener_bind"))?;
+    let internal = tokio::net::TcpListener::bind(args.internal_listen)
+        .await
+        .context(Stage("internal_listener_bind"))?;
     tracing::info!(public=%args.listen,internal=%args.internal_listen,"starting grading portal");
     tokio::try_join!(
         async {

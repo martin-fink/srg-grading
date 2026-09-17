@@ -1,0 +1,16 @@
+# Current examples
+
+Use these together for the shared runner workflow:
+
+- `course.toml`: local course metadata.
+- `exercises.toml`: local exercise catalog, **schema version 1**.
+- `shared-grader/`: copy its contents to the private grader repository. Its
+  `exercise.toml` uses **schema version 3**, with commands pointing at `/grader`.
+- `scripted-template/`: copy its contents to the student template repository.
+
+The CLI reads the grader repository at the commit selected by `grader_ref` in the
+local catalog. Commit and push grader changes, then use `main` or the new full SHA.
+Local edits to a grader checkout do not change a previously pinned remote commit.
+
+`grader/`, `template/`, and `scripted-grader/` are legacy compatibility examples.
+Their schema-1/2 image-building contracts do not support `--runner-image`.

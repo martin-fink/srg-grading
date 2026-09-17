@@ -20,6 +20,7 @@ use grading_store::{
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -204,10 +205,60 @@ fn operator() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    for directive in ["reqwest=off", "hyper=off", "hyper_util=off", "sqlx=off"] {
+        filter = filter.add_directive(directive.parse().unwrap());
+    }
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    let operation = match &args.command {
+        Command::Migrate => "migrate",
+        Command::Exercise { .. } => "exercise",
+        Command::Admin { .. } => "admin",
+        Command::Course { .. } => "course_import",
+        Command::Roster { .. } => "roster_import",
+        Command::Manifest { .. } => "manifest",
+        Command::Worker { .. } => "worker",
+        Command::Grades { .. } => "grade_export",
+        Command::Extension { .. } => "extension",
+        Command::Regrade { .. } => "regrade",
+        Command::SelectSubmission { .. } => "submission_override",
+        Command::Work { .. } => "task_worker",
+        Command::Sync => "repository_sync",
+    };
+    let supervised = matches!(args.command, Command::Work { .. } | Command::Sync);
+    let started = std::time::Instant::now();
+    tracing::info!(operation, "CLI operation started");
+    let outcome = run(args)
+        .instrument(tracing::info_span!("cli_operation", operation))
+        .await;
+    if let Err(error) = outcome {
+        let details = grading_store::diagnostics(&error);
+        tracing::error!(
+            operation,
+            stage = details.stage,
+            reason = details.reason,
+            upstream_status = details.upstream_status,
+            "CLI operation failed"
+        );
+        if supervised {
+            anyhow::bail!("supervised operation failed; see sanitized diagnostics");
+        }
+        return Err(error);
+    }
+    tracing::info!(
+        operation,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "CLI operation completed"
+    );
+    Ok(())
+}
+
+async fn run(args: Args) -> Result<()> {
     match &args.command {
         Command::Exercise { command } => {
             let pool = pool(&args).await?;

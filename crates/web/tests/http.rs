@@ -59,7 +59,7 @@ async fn browser_and_worker_boundaries() -> Result<()> {
         tracing_subscriber::fmt()
             .with_ansi(false)
             .without_time()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .with_writer(move || writer.clone())
             .finish(),
     );
@@ -97,6 +97,18 @@ async fn browser_and_worker_boundaries() -> Result<()> {
         let body = to_bytes(response.into_body(), 4096).await?;
         assert!(!String::from_utf8_lossy(&body).contains("secret-"));
     }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/secret-path?token=secret-query")
+                .header("authorization", "Bearer secret-token")
+                .body(Body::empty())?,
+        )
+        .with_subscriber(subscriber.clone())
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(Uuid::parse_str(response.headers()["x-request-id"].to_str()?).is_ok());
     let logs = String::from_utf8(capture.0.lock().unwrap().clone())?;
     for stage in ["query_parse", "login_cookie", "login_state"] {
         assert!(logs.contains(stage), "missing callback stage {stage}");
@@ -104,6 +116,8 @@ async fn browser_and_worker_boundaries() -> Result<()> {
     for sensitive in ["secret-", "code=", "state=", "/auth/callback?"] {
         assert!(!logs.contains(sensitive));
     }
+    assert!(logs.contains("request_id="));
+    assert!(logs.contains("unmatched"));
     let unknown = identity::new_session(&pool, 200, "unknown-account", None).await?;
     let cookie = format!("__Host-grading-session={unknown}");
     let session = identity::session(&pool, &unknown).await?.unwrap();

@@ -1,6 +1,6 @@
 //! Public browser routes, signed webhook ingestion, and the separate worker listener.
 use crate::pages::{AdminPage, AdminRow, Dashboard};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use askama::Template;
 use axum::{
     Form, Json, Router,
@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
+use grading_core::diagnostics::Stage;
 use grading_core::{
     protocol::{Heartbeat, LeaseRequest, Revision, RunResult},
     security,
@@ -27,6 +28,7 @@ use grading_store::{
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tracing::Instrument;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "__Host-grading-session";
@@ -43,17 +45,18 @@ pub struct AppState {
 
 pub struct HttpError(pub StatusCode);
 impl From<anyhow::Error> for HttpError {
-    fn from(_: anyhow::Error) -> Self {
-        Self(StatusCode::INTERNAL_SERVER_ERROR)
+    fn from(error: anyhow::Error) -> Self {
+        diagnostic_error("request_handler", &error, StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 impl From<sqlx::Error> for HttpError {
     fn from(error: sqlx::Error) -> Self {
-        Self(if matches!(error, sqlx::Error::RowNotFound) {
+        let status = if matches!(error, sqlx::Error::RowNotFound) {
             StatusCode::NOT_FOUND
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
-        })
+        };
+        diagnostic_error("database_query", &error.into(), status)
     }
 }
 impl IntoResponse for HttpError {
@@ -74,6 +77,59 @@ impl IntoResponse for HttpError {
 }
 type HttpResult<T> = Result<T, HttpError>;
 
+fn diagnostic_error(stage: &'static str, error: &anyhow::Error, status: StatusCode) -> HttpError {
+    let details = grading_store::diagnostics(error);
+    let stage = if details.stage == "unspecified" {
+        stage
+    } else {
+        details.stage
+    };
+    tracing::warn!(
+        stage,
+        reason = details.reason,
+        upstream_status = details.upstream_status,
+        status = status.as_u16(),
+        "request operation failed"
+    );
+    HttpError(status)
+}
+
+async fn request_diagnostics(request: Request, next: Next) -> Response {
+    let request_id = Uuid::new_v4();
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| path.as_str())
+        .unwrap_or("unmatched")
+        .to_owned();
+    let method = match request.method().as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => "OTHER",
+    };
+    let span = tracing::info_span!("http_request", %request_id, %route, method, task_id=tracing::field::Empty, run_id=tracing::field::Empty);
+    async move {
+        let started = std::time::Instant::now();
+        let mut response = next.run(request).await;
+        let status = response.status().as_u16();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if status >= 400 {
+            tracing::warn!(status, elapsed_ms, "HTTP request failed");
+        } else {
+            tracing::debug!(status, elapsed_ms, "HTTP request completed");
+        }
+        response.headers_mut().insert(
+            "x-request-id",
+            request_id.to_string().parse().expect("UUID header"),
+        );
+        response
+    }
+    .instrument(span)
+    .await
+}
+
 pub fn public_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(dashboard))
@@ -93,6 +149,7 @@ pub fn public_router(state: AppState) -> Router {
         .route("/static/style.css", get(css))
         .layer(DefaultBodyLimit::max(65536))
         .layer(middleware::from_fn(headers))
+        .layer(middleware::from_fn(request_diagnostics))
         .with_state(state)
 }
 
@@ -105,6 +162,7 @@ pub fn internal_router(state: AppState) -> Router {
         .route("/internal/tasks/{id}/result", post(result))
         .route("/internal/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
+        .layer(middleware::from_fn(request_diagnostics))
         .with_state(state)
 }
 
@@ -143,7 +201,9 @@ async fn css() -> impl IntoResponse {
     )
 }
 async fn ready(State(state): State<AppState>) -> HttpResult<&'static str> {
-    grading_store::healthy(&state.pool).await?;
+    grading_store::healthy(&state.pool)
+        .await
+        .context(Stage("database_readiness"))?;
     Ok("ready")
 }
 
@@ -184,6 +244,10 @@ fn csrf(
     if !security::equal(&session.csrf, submitted)
         || origin.is_some_and(|value| value != state.public_origin)
     {
+        tracing::warn!(
+            stage = "csrf_validation",
+            "request CSRF/origin check failed"
+        );
         return Err(HttpError(StatusCode::FORBIDDEN));
     }
     Ok(())
@@ -225,7 +289,9 @@ async fn login(State(state): State<AppState>) -> HttpResult<Response> {
     let login_state = security::token();
     let browser = security::token();
     let verifier = security::token();
-    identity::begin_login(&state.pool, &login_state, &browser, &verifier).await?;
+    identity::begin_login(&state.pool, &login_state, &browser, &verifier)
+        .await
+        .context(Stage("login_state_create"))?;
     let mut response =
         Redirect::to(&state.github.authorize_url(&login_state, &verifier)).into_response();
     set_cookie(&mut response, LOGIN_COOKIE, &browser, 300);
@@ -320,7 +386,7 @@ async fn create_repository(
     csrf(&state, &headers, &session, &form.csrf)?;
     courses::request_repository(&state.pool, session.github_id, id)
         .await
-        .map_err(|_| HttpError(StatusCode::CONFLICT))?;
+        .map_err(|error| diagnostic_error("repository_allocate", &error, StatusCode::CONFLICT))?;
     Ok(Redirect::to("/"))
 }
 async fn submit(
@@ -390,7 +456,7 @@ async fn webhook(
         .and_then(|v| v.to_str().ok())
         .ok_or(HttpError(StatusCode::FORBIDDEN))?;
     security::verify_webhook(&state.webhook_secret, signature, &body)
-        .map_err(|_| HttpError(StatusCode::FORBIDDEN))?;
+        .map_err(|error| diagnostic_error("webhook_validate", &error, StatusCode::FORBIDDEN))?;
     let delivery = headers
         .get("x-github-delivery")
         .and_then(|v| v.to_str().ok())
@@ -415,8 +481,13 @@ async fn webhook(
         return Ok(StatusCode::OK);
     }
     if event == "push" {
-        let push: Push =
-            serde_json::from_slice(&body).map_err(|_| HttpError(StatusCode::BAD_REQUEST))?;
+        let push: Push = serde_json::from_slice(&body).map_err(|error| {
+            diagnostic_error(
+                "webhook_validate",
+                &anyhow::Error::from(error),
+                StatusCode::BAD_REQUEST,
+            )
+        })?;
         let repository:Option<(Uuid,serde_json::Value)>=sqlx::query_as("SELECT r.id,v.definition FROM student_repositories r JOIN assignment_revisions v ON v.digest=r.revision_digest WHERE r.github_repo_id=$1")
             .bind(push.repository.id).fetch_optional(&mut *tx).await?;
         if let Some((id, definition)) = repository {
@@ -438,7 +509,9 @@ async fn webhook(
                         Some(delivery),
                     )
                     .await
-                    .map_err(|_| HttpError(StatusCode::BAD_REQUEST))?;
+                    .map_err(|error| {
+                        diagnostic_error("webhook_validate", &error, StatusCode::BAD_REQUEST)
+                    })?;
                 }
             }
         }
@@ -509,7 +582,7 @@ async fn worker(state: &AppState, headers: &HeaderMap) -> HttpResult<grading::Wo
         .ok_or(HttpError(StatusCode::UNAUTHORIZED))?;
     grading::authenticate(&state.pool, raw)
         .await
-        .map_err(|_| HttpError(StatusCode::UNAUTHORIZED))
+        .map_err(|error| diagnostic_error("worker_authenticate", &error, StatusCode::UNAUTHORIZED))
 }
 async fn lease(
     State(state): State<AppState>,
@@ -527,13 +600,14 @@ async fn heartbeat(
     Path(id): Path<Uuid>,
     Json(body): Json<Heartbeat>,
 ) -> HttpResult<StatusCode> {
+    tracing::Span::current().record("task_id", tracing::field::display(id));
     let worker = worker(&state, &headers).await?;
     grading::owned_lease(&state.pool, &worker, id, body.lease_token, false)
         .await
-        .map_err(|_| HttpError(StatusCode::CONFLICT))?;
+        .map_err(|error| diagnostic_error("lease_heartbeat", &error, StatusCode::CONFLICT))?;
     queue::heartbeat(&state.pool, id, body.lease_token, &worker.id)
         .await
-        .map_err(|_| HttpError(StatusCode::CONFLICT))?;
+        .map_err(|error| diagnostic_error("lease_heartbeat", &error, StatusCode::CONFLICT))?;
     Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]
@@ -546,10 +620,11 @@ async fn source(
     Path(id): Path<Uuid>,
     Query(query): Query<SourceQuery>,
 ) -> HttpResult<Response> {
+    tracing::Span::current().record("task_id", tracing::field::display(id));
     let worker = worker(&state, &headers).await?;
     let lease = grading::owned_lease(&state.pool, &worker, id, query.lease_token, false)
         .await
-        .map_err(|_| HttpError(StatusCode::NOT_FOUND))?;
+        .map_err(|error| diagnostic_error("submission_source", &error, StatusCode::NOT_FOUND))?;
     Ok((
         [(header::CONTENT_TYPE, "application/json")],
         state.artifacts.get(&lease.source_digest).await?,
@@ -562,10 +637,11 @@ async fn grader_source(
     Path(id): Path<Uuid>,
     Query(query): Query<SourceQuery>,
 ) -> HttpResult<Response> {
+    tracing::Span::current().record("task_id", tracing::field::display(id));
     let worker = worker(&state, &headers).await?;
     let lease = grading::owned_lease(&state.pool, &worker, id, query.lease_token, false)
         .await
-        .map_err(|_| HttpError(StatusCode::NOT_FOUND))?;
+        .map_err(|error| diagnostic_error("grader_source", &error, StatusCode::NOT_FOUND))?;
     let digest = lease
         .revision
         .grader
@@ -584,10 +660,11 @@ async fn result(
     Path(id): Path<Uuid>,
     Json(result): Json<RunResult>,
 ) -> HttpResult<StatusCode> {
+    tracing::Span::current().record("task_id", tracing::field::display(id));
     let worker = worker(&state, &headers).await?;
     grading::accept(&state.pool, &state.artifacts, &worker, id, &result)
         .await
-        .map_err(|_| HttpError(StatusCode::CONFLICT))?;
+        .map_err(|error| diagnostic_error("result_accept", &error, StatusCode::CONFLICT))?;
     Ok(StatusCode::NO_CONTENT)
 }
 async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> HttpResult<String> {
