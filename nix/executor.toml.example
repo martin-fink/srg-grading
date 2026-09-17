@@ -1,0 +1,19 @@
+api_url = "https://grading-worker.example.invalid"
+token_file = "/run/secrets/worker-token"
+tls_identity_file = "/run/secrets/worker-client.pem"
+tls_ca_file = "/run/secrets/worker-ca.pem"
+namespace = "grading-sandboxes"
+runtime_class = "gvisor"
+source_pvc = "grading-source"
+staging_root = "/var/lib/grading-executor"
+
+[profiles.functional-v1]
+# Replace with an independently reviewed image digest and instructor command.
+images = ["ghcr.io/example-course-org/echo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+command = ["/bin/sh", "-c", "exec /workspace/src/solution.sh"]
+timeout_seconds = 86400
+
+[profiles.functional-v1.resources]
+cpu = 10
+memory_gib = 32
+storage_gib = 64

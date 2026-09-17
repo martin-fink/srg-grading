@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up dedicated grading database and artifacts to Borg
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/grading
+EnvironmentFile=/run/grading/compose.env
+EnvironmentFile=/run/grading/borg.env
+ExecStart=/bin/bash /opt/grading/backup.sh
+TimeoutStartSec=6h

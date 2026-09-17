@@ -1,0 +1,6 @@
+/target
+.direnv
+/.local
+/result
+/result-*
+/.env
