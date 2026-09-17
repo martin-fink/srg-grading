@@ -47,7 +47,10 @@ struct InstallationToken {
 #[derive(Debug)]
 pub enum LoginError {
     TokenRequest,
-    TokenResponse,
+    TokenResponse {
+        reason: &'static str,
+        upstream_status: u16,
+    },
     AccountRequest,
     AccountResponse,
     AccountValidation,
@@ -57,10 +60,28 @@ impl LoginError {
     pub fn stage(&self) -> &'static str {
         match self {
             Self::TokenRequest => "token_request",
-            Self::TokenResponse => "token_response",
+            Self::TokenResponse { .. } => "token_response",
             Self::AccountRequest => "account_request",
             Self::AccountResponse => "account_response",
             Self::AccountValidation => "account_validation",
+        }
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::TokenResponse { reason, .. } => reason,
+            Self::TokenRequest | Self::AccountRequest => "request_failed",
+            Self::AccountResponse => "response_failed",
+            Self::AccountValidation => "not_individual_account",
+        }
+    }
+
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::TokenResponse {
+                upstream_status, ..
+            } => Some(*upstream_status),
+            _ => None,
         }
     }
 }
@@ -120,10 +141,6 @@ impl GitHub {
     }
 
     pub async fn login(&self, code: &str, verifier: &str) -> Result<Account, LoginError> {
-        #[derive(Deserialize)]
-        struct Token {
-            access_token: String,
-        }
         let response = self
             .http
             .post("https://github.com/login/oauth/access_token")
@@ -138,13 +155,11 @@ impl GitHub {
             .send()
             .await
             .map_err(|_| LoginError::TokenRequest)?;
-        let token: Token = decode(response, 65536)
-            .await
-            .map_err(|_| LoginError::TokenResponse)?;
+        let token = login_token(response).await?;
         let response = self
             .http
             .get("https://api.github.com/user")
-            .bearer_auth(&token.access_token)
+            .bearer_auth(&token)
             .send()
             .await
             .map_err(|_| LoginError::AccountRequest)?;
@@ -335,6 +350,57 @@ impl GitHub {
     }
 }
 
+async fn login_token(mut response: reqwest::Response) -> Result<String, LoginError> {
+    let status = response.status();
+    let failure = |reason| LoginError::TokenResponse {
+        reason,
+        upstream_status: status.as_u16(),
+    };
+    if response.content_length().is_some_and(|n| n > 65536) {
+        return Err(failure("response_too_large"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| failure("body_read_failed"))?
+    {
+        if bytes.len() + chunk.len() > 65536 {
+            return Err(failure("response_too_large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    parse_login_token(status, &bytes)
+}
+
+fn parse_login_token(status: StatusCode, bytes: &[u8]) -> Result<String, LoginError> {
+    let failure = |reason| LoginError::TokenResponse {
+        reason,
+        upstream_status: status.as_u16(),
+    };
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| failure("invalid_json"))?;
+    if let Some(error) = value.get("error") {
+        let reason = match error.as_str() {
+            Some("incorrect_client_credentials") => "incorrect_client_credentials",
+            Some("redirect_uri_mismatch") => "redirect_uri_mismatch",
+            Some("bad_verification_code") => "bad_verification_code",
+            Some("unverified_user_email") => "unverified_user_email",
+            Some("access_denied") => "access_denied",
+            _ => "oauth_error_other",
+        };
+        return Err(failure(reason));
+    }
+    if !status.is_success() {
+        return Err(failure("http_status"));
+    }
+    value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| failure("missing_access_token"))
+}
+
 pub async fn bounded_bytes(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     ensure!(response.status().is_success(), "HTTP {}", response.status());
     ensure!(
@@ -353,4 +419,55 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response, limit: usize) 
     Ok(serde_json::from_slice(
         &bounded_bytes(response, limit).await?,
     )?)
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn token_errors_expose_only_allowlisted_reasons_and_status() {
+        for (status, body, expected) in [
+            (
+                200,
+                r#"{"error":"incorrect_client_credentials","error_description":"SECRET","error_uri":"https://example/SECRET","access_token":"SECRET"}"#,
+                "incorrect_client_credentials",
+            ),
+            (
+                400,
+                r#"{"error":"redirect_uri_mismatch"}"#,
+                "redirect_uri_mismatch",
+            ),
+            (
+                200,
+                r#"{"error":"bad_verification_code"}"#,
+                "bad_verification_code",
+            ),
+            (
+                200,
+                r#"{"error":"SECRET","error_description":"SECRET"}"#,
+                "oauth_error_other",
+            ),
+            (502, "SECRET", "invalid_json"),
+            (401, r#"{"access_token":"SECRET"}"#, "http_status"),
+            (200, r#"{"access_token":""}"#, "missing_access_token"),
+            (
+                200,
+                r#"{"access_token":{"SECRET":"SECRET"}}"#,
+                "missing_access_token",
+            ),
+        ] {
+            let error = parse_login_token(StatusCode::from_u16(status).unwrap(), body.as_bytes())
+                .unwrap_err();
+            assert_eq!(error.stage(), "token_response");
+            assert_eq!(error.reason(), expected);
+            assert_eq!(error.upstream_status(), Some(status));
+            assert!(!format!("{error:?} {error}").contains("SECRET"));
+            assert!(std::error::Error::source(&error).is_none());
+        }
+        assert_eq!(
+            parse_login_token(StatusCode::OK, br#"{"access_token":"fixture-token"}"#).unwrap(),
+            "fixture-token"
+        );
+    }
 }

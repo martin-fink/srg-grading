@@ -245,12 +245,30 @@ async fn callback(
         .ok_or_else(|| callback_error("login_cookie", StatusCode::FORBIDDEN))?;
     let verifier = identity::consume_login(&state.pool, &query.state, browser)
         .await
-        .map_err(|_| callback_error("login_state", StatusCode::FORBIDDEN))?;
+        .map_err(|error| {
+            if matches!(
+                error.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                callback_error("login_state", StatusCode::FORBIDDEN)
+            } else {
+                callback_error("login_state_store", StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        })?;
     let account = state
         .github
         .login(&query.code, &verifier)
         .await
-        .map_err(|error| callback_error(error.stage(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(|error| {
+            tracing::warn!(
+                stage = error.stage(),
+                reason = error.reason(),
+                upstream_status = error.upstream_status(),
+                status = 500,
+                "GitHub login callback failed"
+            );
+            HttpError(StatusCode::INTERNAL_SERVER_ERROR)
+        })?;
     let session = identity::new_session(
         &state.pool,
         account.id,

@@ -38,6 +38,17 @@ The cluster's SOPS keys are `grading-github-config`, `grading-github-private-key
 and `grading-github-webhook-secret`. The webhook secret must contain at least 32
 bytes and match GitHub exactly. Keep credentials out of images and the Nix store.
 
+Callback warnings contain fixed stage/reason codes and numeric HTTP statuses only.
+`login_state` means the browser/state pair is missing, expired (five minutes), or
+already consumed; start again from `/login` instead of refreshing the callback.
+`login_state_store` indicates a database failure. At `token_response`, `status` is
+the portal response and `upstream_status` is GitHub's response. GitHub may return an
+OAuth error with HTTP 200. The allowlisted `reason` distinguishes
+`incorrect_client_credentials`, `redirect_uri_mismatch`, `bad_verification_code`,
+and other safe categories. Check client ID/secret pairing, registered callback URL,
+or retry a fresh login accordingly. Unknown error strings, descriptions, response
+bodies and all authentication values are discarded, never logged.
+
 Migrations apply schema and grants using the owner OS/database account before
 web/tasks start. Administration uses the real application binary directly on Astrid:
 
