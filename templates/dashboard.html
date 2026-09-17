@@ -9,28 +9,26 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header>
-    <div class="bar"><a class="brand" href="/">Technical University of Munich<span>Grading portal</span></a>
+    <div class="bar"><a class="brand" href="/">Technical University of Munich Systems · Research Group<span></span></a>
         <nav aria-label="Account">{% if authenticated %}<span>{{ login }}</span>{% if admin %}<a href="/admin">Administration</a>{%
-            endif %}{% if !preview %}
+            endif %}
             <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}">
                 <button class="quiet" type="submit">Sign out</button>
             </form>
-            {% endif %}{% endif %}
+            {% endif %}
         </nav>
     </div>
 </header>
 <main id="main">
-    {% if preview %}<p class="notice">Design preview · Example data. Login and repository actions are disabled.</p>{%
-    endif %}
     <p class="eyebrow">Coursework</p>
     <h1>Your assignments</h1>
     {% if !authenticated %}
-    <p class="intro">View your assignments, create your repositories, and follow your official results.</p>
+    <p class="intro">View your assignments, create your repositories, and see results.</p>
     <a class="button" href="/login">Sign in with GitHub</a>
     <p class="muted">Use the GitHub account you supplied for enrollment. Course access is managed by your
         instructor.</p>
     {% else %}
-    <p class="intro">Your repositories and official grading results, in one place.</p>
+    <p class="intro">Your repositories and grading results.</p>
     {% if rows.is_empty() %}
     <section class="empty"><h2>No courses yet</h2>
         <p>This GitHub account is not enrolled in a course. Contact your instructor to check your enrollment.</p>
@@ -48,7 +46,7 @@
                 <dd>{{ row.deadline }}</dd>
             </div>
             <div>
-                <dt>Official points</dt>
+                <dt>Points</dt>
                 <dd class="points">{{ row.points }}</dd>
             </div>
             <div>
@@ -84,14 +82,10 @@
     <section class="policy"><h2>How submissions work</h2>
         <p>A push is registered when this service receives its GitHub webhook. You can also register the current branch
             commit here before the deadline. The latest eligible registered commit is your submission. Commits received
-            after the deadline are not backdated.</p>
-        <p>GitHub Actions provides feedback. Official points come from an independent run of the public tests for the
-            recorded commit. Private checks may adjust or invalidate those points; the grading report records the reason.
-            Integrity failures need review and are not automatic misconduct findings.</p>
-        <p>Repository access may become read-only after the deadline. This does not extend the submission cutoff.</p>
+            after the deadline will not be considered.</p>
     </section>
     {% endif %}
 </main>
-<footer>Technical University of Munich · Repository-first grading</footer>
+<footer>Technical University of Munich · Systems Research Group</footer>
 </body>
 </html>
