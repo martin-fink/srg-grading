@@ -5,9 +5,10 @@ stores application state and durable tasks; Axum and Askama serve a small websit
 The interface uses TUM blue (`#0065BD`), plain typography, local CSS, and ordinary
 forms. It has no frontend build step, CDN, or JavaScript dependency.
 
-This repository does not deploy anything or migrate Autolab/Tango. Live GitHub App
-permissions, a real Kubernetes/gVisor workload, VM container isolation, and the
-instructor-account pilot remain deployment acceptance work.
+This repository builds the application and its container images. Deployment lives
+in [doctor-cluster-config](https://github.com/TUM-DSE/doctor-cluster-config/blob/master/docs/grading-infrastructure.md).
+Live GitHub App permissions, Kubernetes/gVisor isolation, and the instructor-account
+pilot require deployment acceptance testing.
 
 ## Try the website
 

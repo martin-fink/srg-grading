@@ -1,3 +1,4 @@
+# Configuration format example only. The cluster generates its own executor TOML.
 api_url = "https://grading-worker.example.invalid"
 token_file = "/run/secrets/worker-token"
 tls_identity_file = "/run/secrets/worker-client.pem"
