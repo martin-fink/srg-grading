@@ -1,5 +1,5 @@
 [Unit]
-Description=Reconcile grading repositories and deadline closures
+Description=Sync grading repositories and deadline closures
 After=docker.service network-online.target
 Requires=docker.service
 
@@ -8,5 +8,5 @@ Type=oneshot
 User=root
 WorkingDirectory=/opt/grading
 EnvironmentFile=/run/grading/compose.env
-ExecStart=/usr/bin/docker compose -f /opt/grading/compose.yaml run --rm operator reconcile
+ExecStart=/usr/bin/docker compose -f /opt/grading/compose.yaml run --rm operator sync
 TimeoutStartSec=6h

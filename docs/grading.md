@@ -41,7 +41,7 @@ before extraction. Paths and exact Git blob bytes are used, without checkout or
 line-ending conversion. These limits target small assignment repositories; large
 dependencies belong in the pinned grading image.
 
-Daily reconciliation records observations and marks unseen branch SHAs for review,
+Daily synchronization records observations and marks unseen branch SHAs for review,
 without creating historical receipt evidence. It freezes the latest eligible
 registered submission, queues missing final work, downgrades access, verifies the
 effective permission, and records the actual lock timestamp. Failed locks retain

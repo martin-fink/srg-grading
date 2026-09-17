@@ -1,4 +1,4 @@
-//! Retriable GitHub tasks and daily reconciliation with durable per-repository observations.
+//! Retriable GitHub tasks and daily synchronization with durable per-repository observations.
 use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use grading_core::{integrity::Snapshot, protocol::Revision};
@@ -261,20 +261,20 @@ async fn lock(context: &ContextData, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-pub async fn reconcile(context: &ContextData) -> Result<()> {
+pub async fn sync(context: &ContextData) -> Result<()> {
     let mut connection = context.pool.acquire().await?.detach();
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(704313)")
         .fetch_one(&mut connection)
         .await?;
-    ensure!(locked, "reconciliation is already running");
-    let outcome = reconcile_inner(context).await;
+    ensure!(locked, "repository sync is already running");
+    let outcome = sync_inner(context).await;
     sqlx::query("SELECT pg_advisory_unlock(704313)")
         .execute(&mut connection)
         .await?;
     outcome
 }
 
-async fn reconcile_inner(context: &ContextData) -> Result<()> {
+async fn sync_inner(context: &ContextData) -> Result<()> {
     queue::expire_exhausted(&context.pool).await?;
     submissions::refill_snapshots(&context.pool).await?;
     sqlx::query("UPDATE tasks SET status='pending',attempts=0,available_at=now() WHERE status='failed' AND kind IN ('provision','snapshot','publish','lock')").execute(&context.pool).await?;
@@ -286,7 +286,7 @@ async fn reconcile_inner(context: &ContextData) -> Result<()> {
         sqlx::query("INSERT INTO reconciliation_observations(repository_id,success,detail) VALUES($1,$2,$3)")
             .bind(id).bind(result.is_ok()).bind(if result.is_ok(){"Identity, branch and permissions observed"}else{"Observation failed; retry required"}).execute(&context.pool).await?;
         if result.is_err() {
-            tracing::warn!(repository_id=%id,"reconciliation observation failed");
+            tracing::warn!(repository_id=%id,"repository sync observation failed");
         }
         submissions::close(&context.pool, id).await?;
     }

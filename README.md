@@ -65,7 +65,7 @@ the `.#` build commands.
 | `github` | App JWTs/tokens, PKCE authorization, repository APIs, Checks |
 | `web` | Login, assignment dashboard, forms, plain-text reports, worker listener |
 | `executor` | Independent profile approval, gVisor Jobs, trusted output comparison |
-| `cli` | Imports, admin changes, queue processing, reconciliation, exports |
+| `cli` | Imports, admin changes, queue processing, synchronization, exports |
 
 The three binaries are `grading-web`, `gradingctl`, and `grading-executor`.
 See [operations](docs/operations.md), [grading protocol](docs/grading.md), and
@@ -93,7 +93,7 @@ gradingctl extension --repository REPOSITORY_UUID --deadline 2026-11-01T12:00:00
 gradingctl grades override --repository REPOSITORY_UUID --points 18 --reason 'Reviewed correction'
 gradingctl regrade --submission SUBMISSION_UUID --reason 'Infrastructure recovery'
 gradingctl select-submission --event EVENT_UUID --reason 'Reviewed delayed webhook evidence'
-gradingctl reconcile
+gradingctl sync
 ```
 
 Admin management uses a dedicated DB credential unavailable to the web and

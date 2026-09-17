@@ -144,17 +144,17 @@ configure that client channel. The narrow listener is separate from browser
 routes. The provided nginx fragment leaves certificate and allowlist choices to
 host infrastructure. Never proxy `/internal/` on the public host.
 
-## Reconciliation, metrics, and backups
+## Synchronization, metrics, and backups
 
 `gradingctl work` continuously processes provisioning, snapshots, Check publishing,
-and locks. `gradingctl reconcile` is a separate daily command with a PostgreSQL
+and locks. `gradingctl sync` is a separate daily command with a PostgreSQL
 advisory lock; failures are recorded per repository. Review/install the persistent
 systemd timer using the existing host mechanism. Neither script runs automatically
 just because it exists in this repository.
 
 The authenticated internal `/internal/metrics` endpoint exposes aggregate queue
 age, pending/failed tasks, stale leases, pending locks, failed provisioning, and
-integrity-failed runs. Reconciliation observations, integrity findings, and task
+integrity-failed runs. Synchronization observations, integrity findings, and task
 errors are also available in PostgreSQL; the admin page shows course counts. Host
 monitoring must alert on failed locks/provisioning, queue age, repeated API failures,
 disk quotas, stale leases, and backup freshness. Logs deliberately avoid request

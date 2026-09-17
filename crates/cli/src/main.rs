@@ -1,4 +1,4 @@
-//! Local course administration and reconciliation commands.
+//! Local course administration and synchronization commands.
 mod lifecycle;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Utc};
@@ -83,7 +83,8 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    Reconcile,
+    /// Sync repository state, close expired assignments, and retry incomplete work.
+    Sync,
 }
 #[derive(Subcommand)]
 enum Admin {
@@ -465,8 +466,8 @@ async fn main() -> Result<()> {
             )
             .await?
         }
-        Command::Reconcile => {
-            lifecycle::reconcile(&lifecycle::ContextData {
+        Command::Sync => {
+            lifecycle::sync(&lifecycle::ContextData {
                 pool: pool(&args).await?,
                 github: github(&args).await?,
                 artifacts: Artifacts::new(&args.artifact_dir).await?,

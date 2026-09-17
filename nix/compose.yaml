@@ -102,7 +102,7 @@ services:
       GRADING_DATABASE_URL_FILE: /run/secrets/database-url
       GRADING_GITHUB_CONFIG: /run/secrets/github.json
       USER: "${GRADING_OPERATOR:-host-root}"
-    command: [reconcile]
+    command: [sync]
     volumes:
       - ${GRADING_STATE}/artifacts:/var/lib/grading/artifacts
       - ${GRADING_SECRETS}/operator/database-url:/run/secrets/database-url:ro
