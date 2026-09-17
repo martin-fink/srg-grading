@@ -1,7 +1,10 @@
 //! Bounded execution transcripts collected before sandbox deletion.
 use crate::{JobOutcome, wait_job};
-use anyhow::Result;
-use grading_core::protocol::{MAX_RUN_LOG_BYTES, RunLog};
+use anyhow::{Context, Result};
+use grading_core::{
+    diagnostics::Stage,
+    protocol::{MAX_RUN_LOG_BYTES, RunLog},
+};
 use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
 use kube::{
     Api,
@@ -58,7 +61,8 @@ pub async fn wait(
             stderr: String,
             exit_code: i32,
         }
-        let output: Output = serde_json::from_str(output)?;
+        let output: Output =
+            serde_json::from_str(output).context(Stage("student_output_decode"))?;
         capture.push(
             student_visible,
             &format!(

@@ -305,10 +305,12 @@ pub fn execution_job(
     value["metadata"]["name"] = json!(format!("exec-{id}"));
     let container = &mut value["spec"]["template"]["spec"]["containers"][0];
     let mut command = vec![
-        "/bin/sh".to_owned(),
+        "/bin/python3".to_owned(),
         "-c".into(),
-        "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin 2>/tmp/stderr"
-            .into(),
+        include_str!("../../../scripts/capture-execution.py").into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin".into(),
         "grading".into(),
     ];
     command.extend(request.command.clone());
