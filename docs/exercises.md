@@ -22,7 +22,72 @@ grading Pods. Changing scripts/tests needs no image build or executor profile ed
 
 Import the course first with `gradingctl course apply course.toml`. A course can
 now start with no assignments, just schema_version and its `[course]` table.
-Keep course configuration committed to its private Git repository as before.
+The command reads the supplied file directly, including uncommitted edits, with
+no Git requirement. See [the minimal course file](../examples/course.toml).
+
+### Apply exercise files
+
+The primary bulk workflow is:
+
+```sh
+gradingctl exercise apply exercises.toml --reason 'Initial course exercises' --dry-run
+gradingctl exercise apply exercises.toml --reason 'Initial course exercises'
+```
+
+[Example catalog](../examples/exercises.toml):
+
+```toml
+schema_version = 1
+course = "systems-2026"
+runner_image = "REGISTRY/grading/runner@sha256:FULL_DIGEST"
+
+[exercises.echo]
+template = "COURSE/echo-template"
+template_ref = "main"
+grader = "COURSE/echo-grader"
+grader_ref = "FULL_COMMIT_SHA"
+opens_at = 2026-10-12T08:00:00+02:00
+deadline = 2026-10-26T23:59:00+01:00
+existing = false
+```
+
+The local catalog defines repository URLs, refs, dates and runner selection. Each
+private grader repository still owns its schema-3 `exercise.toml` with points,
+resources, editable paths and commands. The catalog itself has schema version 1.
+It requires no local Git repository. URLs accept GitHub HTTPS or `owner/repository`.
+Refs accept branches (including `main`) or full lowercase commit SHAs; omitted refs
+default to `main`, resolved afresh on each apply. Entry-level `runner_image` overrides
+the file default. Omitting both retains an existing shared runner; new exercises
+require one. `existing = true` explicitly updates future grading for existing
+repositories, preserving their original template and historical results.
+
+Multiple files may describe different courses or split one course's exercises:
+
+```sh
+gradingctl exercise apply first-half.toml second-half.toml --reason 'Course update' --dry-run
+```
+
+The **union of supplied files is the complete desired list for each named course**.
+Other courses are untouched. Duplicate course/exercise pairs and unknown keys are
+errors. Passing only one part of a split catalog proposes removing exercises from
+its omitted parts. An empty list proposes retiring all active exercises in that course.
+
+Every exercise is fetched/validated and its resolved commits shown before application.
+The preview lists ADD, UPDATE, RESTORE and UNCHANGED entries. Removals print a prominent
+warning and each affected course/exercise. Actual removal requires a terminal and
+the exact phrase `REMOVE EXERCISES`; declining, EOF or noninteractive input aborts
+without changing exercises. Dry runs show removals without prompting and store no
+artifacts or database changes.
+
+Removal means retirement from new repository allocations, not deletion of student
+repositories, runs or grades. Existing repositories continue grading/closure under
+their recorded policy and remain visible to their students. A later file application
+can restore a retired exercise. The prepared catalog commits in one DB transaction;
+a concurrent course/exercise change rejects the stale preview before any catalog
+mutation. Source snapshots are retained before publication and may remain unreferenced
+if publication fails. Audit records include operator, reason and input file digests.
+
+### Individual registration (also supported)
 
 ```sh
 gradingctl exercise add --course systems-2026 --name echo \
@@ -267,10 +332,11 @@ Build the example runtime with `nix build .#runner-image`; publishing it to your
 registry is a separate deployment step. No course sources are included. Its contents
 are a baseline for the C/Python example, not a claim of LLVM/FPGA/SimBricks support.
 
-Apply migrations through 0004 and updated grants using the owner role. Upgrade
+Apply migrations through 0005 and updated grants using the owner role. Upgrade
 web/tasks/executor together before registering schema 3. Migration 0004 adds a
 foreign-key reference from immutable revisions to their retained grader artifacts;
-back up those artifacts with accepted student snapshots and reports.
+back up those artifacts with accepted student snapshots and reports. Migration 0005
+adds the exercise retirement flag used by file imports.
 
 The controller uses UID/GID 10004 and needs a writable per-lease `control` subpath
 on the staging PVC. The executor must own this directory and the private grader

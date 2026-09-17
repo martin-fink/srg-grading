@@ -110,12 +110,29 @@ There is no HTTP grant endpoint. The last admin cannot be revoked
 without `--recovery-override`. Audit records include the operator, immutable target
 ID, reason, and timestamp. Host-root provisioning supplies the operator identity.
 
-Course imports read **committed HEAD files** from the supplied Git repository,
-including the private manifest; working-tree changes are not applied. Dry runs
-resolve GitHub identities and validate changes inside a rolled-back transaction.
-Imports preserve omitted enrollments and all history. Existing repositories keep
-their original assignment revision when a new course version is imported. The
-prototype intentionally has no automatic template rollout to existing repositories.
+Course imports read the supplied local TOML file directly, including uncommitted
+edits. Legacy integrity-manifest paths resolve relative to that file. No Git
+repository is needed; the import records a SHA-256 content digest. A metadata-only
+course file needs no GitHub credential. See [course.toml](examples/course.toml).
+Roster imports preserve omitted enrollments and history.
+
+Apply the complete exercise list from one or more local files:
+
+```sh
+gradingctl exercise apply exercises.toml --reason 'Course setup' --dry-run
+gradingctl exercise apply exercises.toml --reason 'Course setup'
+gradingctl exercise apply first-half.toml second-half.toml --reason 'Course update' --dry-run
+```
+
+See [exercises.toml](examples/exercises.toml). Files for the same course are merged;
+duplicate exercise names are rejected. Template/grader refs accept branch names or
+full commit SHAs. Omitted refs mean `main`, resolved to exact commits on each apply.
+Exercises omitted from the combined list are proposed for retirement. Apply prints
+a prominent removal list and requires typing `REMOVE EXERCISES` in a terminal.
+Dry run never prompts or changes records. Retired exercises stop accepting new
+repository allocations; existing repositories, grading and history remain intact.
+All database changes commit together after validation/confirmation. Concurrent
+catalog changes reject the stale plan. Listing a retired exercise restores it.
 
 The initial schema implements the exact receipt-time cutoff policy. Extensions are
 explicit and must precede closure. After closure, use the audited event-selection

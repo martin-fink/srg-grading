@@ -1,0 +1,7 @@
+schema_version = 1
+
+[course]
+id = "systems-2026"
+title = "Practical Systems"
+github_organization = "ls1-courses"
+timezone = "Europe/Berlin"

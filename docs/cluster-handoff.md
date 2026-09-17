@@ -46,7 +46,7 @@ snapshot there. Mickey fetches accepted student and grader snapshots over the
 lease-authenticated internal API; it receives no GitHub token. The source gateway
 preserves the existing App credential boundary rather than minting tokens for Jobs.
 
-Apply migrations through 0004 and updated grants; upgrade web/tasks/executor together.
+Apply migrations through 0005 and updated grants; upgrade web/tasks/executor together.
 Include grader artifacts in the existing application-volume backups. Existing student
 Git trees stay pinned; `--existing` changes only subsequent grading runs.
 
@@ -63,3 +63,9 @@ restricted mounts and identity.
 Student private reports now show scores/status only; detailed findings are available
 to current administrators. Private test inputs seen by a student program cannot be
 made inherently secret, so never publish its private-run output to students.
+
+Local `course apply` reads current file contents without Git. The new
+`exercise apply FILE... --reason TEXT [--dry-run]` reads a complete TOML catalog
+for each named course and needs the same operator/App/artifact access as registration.
+Allow terminal stdin for typed removal confirmation; noninteractive removals are
+refused. Migration 0005 supports retirement without deleting repositories or grades.

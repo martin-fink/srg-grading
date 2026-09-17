@@ -382,5 +382,88 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             .is_err()
     );
     assert!(sqlx::query("INSERT INTO grading_runs(id,submission_id,revision_digest,attempt,public_run_id) VALUES($1,$2,$3,4,$4)").bind(Uuid::new_v4()).bind(submission).bind(new_pin).bind(private_run).execute(&operator).await.is_err());
+    let before = BTreeMap::from([(
+        config.course.id.clone(),
+        exercises::catalog(&operator, &config.course.id).await?,
+    )]);
+    let mut extra = third.clone();
+    extra.assignment_id = "extra".into();
+    assert!(
+        exercises::apply_set(
+            &operator,
+            &before,
+            &[
+                publication(&extra, None, false, false),
+                publication(&third, None, false, false),
+            ],
+            "fixture",
+            "atomic failure",
+            false
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        exercises::current(&operator, &config.course.id, "extra")
+            .await?
+            .is_none()
+    );
+    exercises::apply_set(&operator, &before, &[], "fixture", "preview retire", true).await?;
+    assert_eq!(
+        exercises::catalog(&operator, &config.course.id).await?,
+        before[&config.course.id]
+    );
+    exercises::apply_set(
+        &operator,
+        &before,
+        &[],
+        "fixture",
+        "confirmed retire",
+        false,
+    )
+    .await?;
+    assert!(
+        exercises::catalog(&operator, &config.course.id)
+            .await?
+            .iter()
+            .all(|e| e.archived)
+    );
+    assert!(
+        courses::request_repository(&web, 8002, assignment_id)
+            .await
+            .is_err()
+    );
+    assert!(!courses::dashboard(&web, 8001).await?.is_empty());
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT points FROM grading_runs WHERE id=$1")
+            .bind(private_run)
+            .fetch_one(&owner)
+            .await?,
+        9
+    );
+    assert!(
+        exercises::apply_set(&operator, &before, &[], "fixture", "stale preview", false)
+            .await
+            .is_err()
+    );
+    let archived = BTreeMap::from([(
+        config.course.id.clone(),
+        exercises::catalog(&operator, &config.course.id).await?,
+    )]);
+    exercises::apply_set(
+        &operator,
+        &archived,
+        &[publication(&third, Some(&third.digest()?), false, false)],
+        "fixture",
+        "restore exercise",
+        false,
+    )
+    .await?;
+    assert!(
+        exercises::catalog(&operator, &config.course.id)
+            .await?
+            .iter()
+            .all(|e| !e.archived)
+    );
     Ok(())
 }

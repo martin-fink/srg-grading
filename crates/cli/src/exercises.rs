@@ -17,6 +17,8 @@ use tokio::process::Command;
 
 #[derive(Subcommand)]
 pub enum ExerciseCommand {
+    /// Apply the complete exercise list from one or more local TOML files.
+    Apply(super::exercise_files::Apply),
     /// Register a new exercise from pinned GitHub sources.
     Add(Register),
     /// Run private grading on final submissions after their effective deadlines.
@@ -125,6 +127,12 @@ fn text_file(snapshot: &Snapshot, path: &str) -> Result<String> {
     .map_err(Into::into)
 }
 
+pub struct Prepared {
+    pub revision: Revision,
+    pub expected: Option<String>,
+    pub source: Option<Vec<u8>>,
+}
+
 pub async fn register(
     pool: &PgPool,
     github: &GitHub,
@@ -133,6 +141,44 @@ pub async fn register(
     operator: &str,
     artifact_dir: &Path,
 ) -> Result<()> {
+    let prepared = prepare(pool, github, args, update).await?;
+    if args.dry_run {
+        println!("Validated exercise; no artifacts or database records changed");
+        return Ok(());
+    }
+    if let Some(source) = &prepared.source {
+        grading_store::artifacts::Artifacts::new(artifact_dir)
+            .await?
+            .put(pool, "source", source)
+            .await?;
+    }
+    exercises::publish(
+        pool,
+        Publication {
+            revision: &prepared.revision,
+            expected: prepared.expected.as_deref(),
+            existing: args.existing,
+            dry_run: false,
+            operator,
+            reason: &args.reason,
+        },
+    )
+    .await?;
+    println!(
+        "Published {}/{} revision {}",
+        args.course,
+        args.name,
+        prepared.revision.digest()?
+    );
+    Ok(())
+}
+
+pub async fn prepare(
+    pool: &PgPool,
+    github: &GitHub,
+    args: &Register,
+    update: bool,
+) -> Result<Prepared> {
     ensure!(
         identifier(&args.course) && identifier(&args.name),
         "invalid course/exercise name"
@@ -331,36 +377,13 @@ pub async fn register(
         "template {template_sha}; grader {grader_sha}; existing repositories use new grader: {}",
         args.existing
     );
-    if args.dry_run {
-        println!(
-            "Validated sources and configuration; no builds, image pushes, or DB changes performed"
-        );
-        return Ok(());
-    }
-    if shared {
-        let artifacts = grading_store::artifacts::Artifacts::new(artifact_dir).await?;
-        artifacts.put(pool, "source", &grader_bytes).await?;
-        let expected = previous.as_ref().map(Revision::digest).transpose()?;
-        exercises::publish(
-            pool,
-            Publication {
-                revision: &revision,
-                expected: expected.as_deref(),
-                existing: args.existing,
-                dry_run: false,
-                operator,
-                reason: &args.reason,
-            },
-        )
-        .await?;
-        println!(
-            "Published {}/{} revision {} using shared runner {}; no images built",
-            args.course,
-            args.name,
-            revision.digest()?,
-            revision.assignment.image
-        );
-        return Ok(());
+    let expected = previous.as_ref().map(Revision::digest).transpose()?;
+    if shared || args.dry_run {
+        return Ok(Prepared {
+            revision,
+            expected,
+            source: shared.then_some(grader_bytes),
+        });
     }
     let config = config
         .as_ref()
@@ -413,30 +436,12 @@ pub async fn register(
         ),
     )
     .await?;
-    let expected = previous.as_ref().map(Revision::digest).transpose()?;
-    exercises::publish(
-        pool,
-        Publication {
-            revision: &revision,
-            expected: expected.as_deref(),
-            existing: args.existing,
-            dry_run: false,
-            operator,
-            reason: &args.reason,
-        },
-    )
-    .await?;
-    println!(
-        "Published {}/{} revision {}",
-        args.course,
-        args.name,
-        revision.digest()?
-    );
-    println!(
-        "Build records retained in {}; previous grades are unchanged",
-        root.display()
-    );
-    Ok(())
+    println!("Build records retained in {}", root.display());
+    Ok(Prepared {
+        revision,
+        expected,
+        source: None,
+    })
 }
 
 async fn build_image(

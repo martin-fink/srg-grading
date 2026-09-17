@@ -26,15 +26,18 @@ pub struct ResolvedStudent {
 pub async fn apply_course(
     pool: &PgPool,
     config: &CourseConfig,
-    git_revision: &str,
+    config_revision: &str,
     revisions: &[(String, Revision)],
     dry_run: bool,
     operator: &str,
 ) -> Result<()> {
     config.validate()?;
     ensure!(
-        valid_hex(git_revision, 40),
-        "config revision must be a full Git SHA"
+        valid_hex(config_revision, 40)
+            || config_revision
+                .strip_prefix("sha256:")
+                .is_some_and(|s| valid_hex(s, 64)),
+        "config revision must be a SHA-256 content digest or legacy Git SHA"
     );
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(704312)")
@@ -50,7 +53,7 @@ pub async fn apply_course(
         "cannot change course organization"
     );
     sqlx::query("INSERT INTO courses(id,title,organization,timezone,config_revision) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET title=$2,timezone=$4,config_revision=$5,updated_at=now()")
-        .bind(&config.course.id).bind(&config.course.title).bind(&config.course.github_organization).bind(&config.course.timezone).bind(git_revision).execute(&mut *tx).await?;
+        .bind(&config.course.id).bind(&config.course.title).bind(&config.course.github_organization).bind(&config.course.timezone).bind(config_revision).execute(&mut *tx).await?;
     for (slug, revision) in revisions {
         revision.validate()?;
         ensure!(
@@ -61,7 +64,7 @@ pub async fn apply_course(
             .bind(Uuid::new_v4()).bind(&config.course.id).bind(slug).fetch_one(&mut *tx).await?;
         let hash = revision.digest()?;
         sqlx::query("INSERT INTO assignment_revisions(digest,assignment_id,config_revision,definition,opens_at,deadline,max_points) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-            .bind(&hash).bind(id).bind(git_revision).bind(serde_json::to_value(revision)?).bind(revision.assignment.opens_at).bind(revision.assignment.deadline).bind(revision.assignment.max_points).execute(&mut *tx).await?;
+            .bind(&hash).bind(id).bind(config_revision).bind(serde_json::to_value(revision)?).bind(revision.assignment.opens_at).bind(revision.assignment.deadline).bind(revision.assignment.max_points).execute(&mut *tx).await?;
         sqlx::query("UPDATE assignments SET current_revision=$2 WHERE id=$1")
             .bind(id)
             .bind(hash)
@@ -73,7 +76,7 @@ pub async fn apply_course(
     )
     .bind(operator)
     .bind(&config.course.id)
-    .bind(git_revision)
+    .bind(config_revision)
     .execute(&mut *tx)
     .await?;
     if dry_run {
@@ -167,7 +170,7 @@ pub async fn request_repository(pool: &PgPool, github_id: i64, assignment: Uuid)
         .execute(&mut *tx)
         .await?;
     let (enrollment, revision, opens, deadline): (Uuid, String, DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
-        "SELECT e.id,r.digest,r.opens_at,r.deadline FROM enrollments e JOIN assignments a ON a.course_id=e.course_id JOIN assignment_revisions r ON r.digest=a.current_revision WHERE e.github_id=$1 AND a.id=$2")
+        "SELECT e.id,r.digest,r.opens_at,r.deadline FROM enrollments e JOIN assignments a ON a.course_id=e.course_id JOIN assignment_revisions r ON r.digest=a.current_revision WHERE e.github_id=$1 AND a.id=$2 AND NOT a.archived")
         .bind(github_id).bind(assignment).fetch_one(&mut *tx).await?;
     if let Some(id) = sqlx::query_scalar(
         "SELECT id FROM student_repositories WHERE enrollment_id=$1 AND assignment_id=$2",
@@ -270,6 +273,6 @@ pub async fn dashboard(pool: &PgPool, github_id: i64) -> Result<Vec<DashboardRow
          LEFT JOIN grading_runs b ON b.id=g.public_run_id
          LEFT JOIN assignment_revisions rv ON rv.digest=g.revision_digest
          LEFT JOIN LATERAL (SELECT points FROM grade_overrides o WHERE o.repository_id=r.id ORDER BY o.created_at DESC,o.id DESC LIMIT 1) o ON true
-         WHERE e.github_id=$1 ORDER BY c.id,a.slug")
+         WHERE e.github_id=$1 AND (NOT a.archived OR r.id IS NOT NULL) ORDER BY c.id,a.slug")
         .bind(github_id).fetch_all(pool).await?)
 }

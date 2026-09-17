@@ -1,4 +1,5 @@
 //! Local course administration and synchronization commands.
+mod exercise_files;
 mod exercises;
 mod lifecycle;
 use anyhow::{Context, Result, ensure};
@@ -211,6 +212,9 @@ async fn main() -> Result<()> {
         Command::Exercise { command } => {
             let pool = pool(&args).await?;
             match command {
+                exercises::ExerciseCommand::Apply(options) => {
+                    exercise_files::apply(&pool, &args, options).await?;
+                }
                 exercises::ExerciseCommand::PrivateGrade {
                     course,
                     name,
@@ -296,18 +300,25 @@ async fn main() -> Result<()> {
         Command::Course {
             command: Course::Apply { file, dry_run },
         } => {
-            let github = github(&args).await?;
-            let (root, revision, relative) = git_location(file).await?;
-            let config = CourseConfig::parse(&git_file(&root, &revision, &relative).await?)?;
+            let contents = tokio::fs::read_to_string(file).await?;
+            let revision = format!("sha256:{}", security::digest(contents.as_bytes()));
+            let config = CourseConfig::parse(&contents)?;
+            let github = if config.assignments.is_empty() {
+                None
+            } else {
+                Some(github(&args).await?)
+            };
             let mut revisions = Vec::new();
             for (id, assignment) in &config.assignments {
-                let manifest_path = relative
+                let manifest_path = file
                     .parent()
                     .unwrap_or(Path::new(""))
                     .join(&assignment.integrity_manifest);
                 let manifest: Manifest =
-                    toml::from_str(&git_file(&root, &revision, &manifest_path).await?)?;
+                    toml::from_str(&tokio::fs::read_to_string(&manifest_path).await?)?;
                 let source = github
+                    .as_ref()
+                    .context("assignment needs GitHub access")?
                     .snapshot(&assignment.template, &assignment.template_revision)
                     .await?;
                 ensure!(
@@ -546,52 +557,6 @@ async fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes).await?;
     file.sync_all().await?;
     Ok(())
-}
-
-async fn git_location(file: &Path) -> Result<(PathBuf, String, PathBuf)> {
-    let absolute = tokio::fs::canonicalize(file).await?;
-    let parent = absolute.parent().context("course path has no parent")?;
-    let root = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(parent)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .await?;
-    ensure!(
-        root.status.success(),
-        "course config must be in a Git repository"
-    );
-    let root = PathBuf::from(String::from_utf8(root.stdout)?.trim());
-    let revision = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .await?;
-    ensure!(
-        revision.status.success(),
-        "course repository has no revision"
-    );
-    let relative = absolute.strip_prefix(&root)?.to_path_buf();
-    Ok((
-        root,
-        String::from_utf8(revision.stdout)?.trim().to_owned(),
-        relative,
-    ))
-}
-async fn git_file(root: &Path, revision: &str, path: &Path) -> Result<String> {
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(format!("{revision}:{}", path.display()))
-        .output()
-        .await?;
-    ensure!(
-        output.status.success(),
-        "configuration and manifests must be committed at {revision}"
-    );
-    Ok(String::from_utf8(output.stdout)?)
 }
 
 async fn export(pool: &PgPool, course: &str, output: &Path) -> Result<()> {

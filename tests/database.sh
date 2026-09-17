@@ -40,6 +40,62 @@ if [[ "${1:-test}" == prepare ]]; then
   SQLX_OFFLINE=false cargo sqlx prepare --workspace -- --all-targets
 else
   cargo test --locked --offline --workspace
+  cat > "$test_root/course.toml" <<'TOML'
+schema_version = 1
+[course]
+id = "local-file-course"
+title = "First local title"
+github_organization = "fixture-org"
+timezone = "UTC"
+TOML
+  printf '%s\n' "$TEST_OPERATOR_DATABASE_URL" > "$test_root/operator-url"
+  env -u GRADING_GITHUB_CONFIG target/debug/gradingctl --database-url-file "$test_root/operator-url" course apply "$test_root/course.toml" --dry-run
+  test "$(psql -X -At -c "SELECT count(*) FROM courses WHERE id='local-file-course'")" = 0
+  env -u GRADING_GITHUB_CONFIG target/debug/gradingctl --database-url-file "$test_root/operator-url" course apply "$test_root/course.toml"
+  sed -i 's/First local title/Edited local title/' "$test_root/course.toml"
+  env -u GRADING_GITHUB_CONFIG target/debug/gradingctl --database-url-file "$test_root/operator-url" course apply "$test_root/course.toml"
+  test "$(psql -X -At -c "SELECT title FROM courses WHERE id='local-file-course'")" = 'Edited local title'
+  cat > "$test_root/exercises.toml" <<'TOML'
+schema_version = 1
+course = "local-file-course"
+TOML
+  env -u GRADING_GITHUB_CONFIG target/debug/gradingctl --database-url-file "$test_root/operator-url" exercise apply "$test_root/exercises.toml" --reason 'Empty catalog preview' --dry-run
+  cat > "$test_root/retire.toml" <<'TOML'
+schema_version = 1
+course = "registered-course"
+TOML
+  python3 - "$test_root/operator-url" "$test_root/retire.toml" <<'PY'
+import os
+import pty
+import subprocess
+import sys
+
+command = ["target/debug/gradingctl", "--database-url-file", sys.argv[1],
+           "exercise", "apply", sys.argv[2], "--reason", "Confirmation fixture"]
+env = dict(os.environ)
+env.pop("GRADING_GITHUB_CONFIG", None)
+
+def active():
+    return subprocess.check_output(["psql", "-X", "-At", "-c",
+        "SELECT count(*) FROM assignments WHERE course_id='registered-course' AND NOT archived"], text=True).strip()
+
+assert active() == "1"
+preview = subprocess.run(command + ["--dry-run"], stdin=subprocess.DEVNULL, capture_output=True, env=env)
+assert preview.returncode == 0 and b"WARNING" in preview.stderr
+refused = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, env=env)
+assert refused.returncode != 0 and b"interactive confirmation" in refused.stderr
+for answer, expected in [(b"no\n", "1"), (b"REMOVE EXERCISES\n", "0")]:
+    master, slave = pty.openpty()
+    process = subprocess.Popen(command, stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    os.close(slave)
+    os.write(master, answer)
+    stdout, stderr = process.communicate(timeout=30)
+    os.close(master)
+    assert b"WARNING" in stderr and b"REMOVE registered-course/echo" in stderr
+    assert (process.returncode == 0) == (expected == "0"), (stdout, stderr)
+    assert active() == expected
+print("Removal preview, terminal confirmation and cancellation checks passed.")
+PY
   PGUSER=grading_owner pg_dump --format=custom --no-owner --no-acl grading > "$test_root/database.dump"
   createdb grading_restore
   pg_restore --exit-on-error --no-owner --no-acl -d grading_restore "$test_root/database.dump"

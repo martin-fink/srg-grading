@@ -59,7 +59,7 @@ pub struct ScorePolicy {
     pub selection: String,
 }
 
-fn datetime<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
+pub fn datetime<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Timestamp {

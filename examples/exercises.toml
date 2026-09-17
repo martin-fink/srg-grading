@@ -1,0 +1,12 @@
+schema_version = 1
+course = "systems-2026"
+runner_image = "registry.example/grading/runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[exercises.echo]
+template = "course/echo-template"
+template_ref = "main"
+grader = "course/echo-grader"
+grader_ref = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+opens_at = 2026-10-12T08:00:00+02:00
+deadline = 2026-10-26T23:59:00+01:00
+existing = false
