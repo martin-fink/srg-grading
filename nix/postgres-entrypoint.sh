@@ -5,6 +5,14 @@ PGPASSWORD=$(cat /run/secrets/postgres-password)
 if [[ ! -f "$PGDATA/PG_VERSION" ]]; then
   initdb -D "$PGDATA" --username=postgres --pwfile=/run/secrets/postgres-password --auth=scram-sha-256 --encoding=UTF8 --no-locale
 fi
+# initdb permits only loopback TCP clients. Application containers connect from
+# other addresses; deployment networking controls which clients can reach us.
+# Keep Unix-socket bootstrap authenticated, and never expose postgres remotely.
+cat > "$PGDATA/pg_hba.conf" <<'HBA'
+local all all scram-sha-256
+host grading grading_owner,grading_web,grading_operator,grading_admin 0.0.0.0/0 scram-sha-256
+host grading grading_owner,grading_web,grading_operator,grading_admin ::/0 scram-sha-256
+HBA
 pg_ctl -D "$PGDATA" -o "-k /run/postgresql -h ''" -w start
 trap 'pg_ctl -D "$PGDATA" -m fast -w stop' EXIT
 if [[ $(psql -X -At -d postgres -c "SELECT count(*) FROM pg_database WHERE datname='grading'") == 0 ]]; then
