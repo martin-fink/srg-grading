@@ -67,10 +67,16 @@ example, the intended admin invocation is:
 docker compose -f /opt/grading/compose.yaml run --rm \
   -e USER="$SUDO_USER" admin \
   --database-url-file /run/secrets/database-url \
-  admin grant --github-id 123456 --reason 'Course administrator'
+  admin grant --github-username martin-fink --reason 'Course administrator'
 ```
 
 The host operator identity is supplied by root, not accepted from an HTTP request.
+Admin grant/revoke accept current GitHub handles and resolve them against the public
+API before writing the internal account ID. Listing admins resolves their current
+handles as well. The admin container therefore has outbound network access, but
+receives no GitHub App secrets. A failed or rate-limited lookup fails the command
+without changing membership; retry after GitHub becomes available. Use the current
+handle after a rename. Student rosters also accept handles, never supplied GitHub IDs.
 The web and operator DB roles cannot change administrators or assume their role.
 Migrations require the owner credential; the runtime never migrates at startup.
 

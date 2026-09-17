@@ -79,9 +79,9 @@ point to those files for `gradingctl`. Every command also supports explicit path
 
 ```sh
 gradingctl --database-url-file /run/secrets/owner-url migrate
-gradingctl --database-url-file /run/secrets/admin-url admin grant --github-id 123456 --reason 'Course administrator'
+gradingctl --database-url-file /run/secrets/admin-url admin grant --github-username martin-fink --reason 'Course administrator'
 gradingctl --database-url-file /run/secrets/admin-url admin list
-gradingctl --database-url-file /run/secrets/admin-url admin revoke --github-id 123456 --reason 'Role ended'
+gradingctl --database-url-file /run/secrets/admin-url admin revoke --github-username martin-fink --reason 'Role ended'
 
 gradingctl course apply /courses/systems/course.toml --dry-run
 gradingctl course apply /courses/systems/course.toml
@@ -97,7 +97,15 @@ gradingctl reconcile
 ```
 
 Admin management uses a dedicated DB credential unavailable to the web and
-operator roles. There is no HTTP grant endpoint. The last admin cannot be revoked
+operator roles. Grant/revoke take GitHub handles and resolve the numeric account ID
+through GitHub before changing membership; `--github-id` is not accepted. `admin list`
+resolves stored IDs to current handles. These commands need GitHub network access,
+but no GitHub App credential. A failed lookup makes no membership change. Student
+imports likewise require `github_username`, resolve it through GitHub, and reject
+a supplied `github_id`. Numeric IDs remain internal identity keys so a renamed
+account does not transfer access to the next owner of its old handle.
+
+There is no HTTP grant endpoint. The last admin cannot be revoked
 without `--recovery-override`. Audit records include the operator, immutable target
 ID, reason, and timestamp. Host-root provisioning supplies the operator identity.
 

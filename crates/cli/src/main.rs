@@ -9,7 +9,7 @@ use grading_core::{
     protocol::{Revision, TestSuite},
     security,
 };
-use grading_github::GitHub;
+use grading_github::{AccountDirectory, GitHub};
 use grading_store::{
     artifacts::Artifacts,
     courses::{self, ResolvedStudent, RosterRow},
@@ -89,13 +89,13 @@ enum Command {
 enum Admin {
     Grant {
         #[arg(long)]
-        github_id: i64,
+        github_username: String,
         #[arg(long)]
         reason: String,
     },
     Revoke {
         #[arg(long)]
-        github_id: i64,
+        github_username: String,
         #[arg(long)]
         reason: String,
         #[arg(long)]
@@ -210,26 +210,34 @@ async fn main() -> Result<()> {
                 .await?;
         }
         Command::Admin { command } => {
+            let directory = AccountDirectory::new()?;
             let pool = pool(&args).await?;
             match command {
-                Admin::Grant { github_id, reason } => {
-                    identity::admin_change(&pool, *github_id, true, false, &operator(), reason)
-                        .await?
+                Admin::Grant {
+                    github_username,
+                    reason,
+                } => {
+                    let account = directory.resolve(github_username).await?;
+                    identity::admin_change(&pool, account.id, true, false, &operator(), reason)
+                        .await?;
+                    println!("Granted administrator access to @{}", account.login);
                 }
                 Admin::Revoke {
-                    github_id,
+                    github_username,
                     reason,
                     recovery_override,
                 } => {
+                    let account = directory.resolve(github_username).await?;
                     identity::admin_change(
                         &pool,
-                        *github_id,
+                        account.id,
                         false,
                         *recovery_override,
                         &operator(),
                         reason,
                     )
-                    .await?
+                    .await?;
+                    println!("Revoked administrator access for @{}", account.login);
                 }
                 Admin::List => {
                     let ids: Vec<i64> =
@@ -237,7 +245,7 @@ async fn main() -> Result<()> {
                             .fetch_all(&pool)
                             .await?;
                     for id in ids {
-                        println!("{id}");
+                        println!("{}", directory.account(id).await?.login);
                     }
                 }
             }
@@ -313,18 +321,7 @@ async fn main() -> Result<()> {
         } => {
             let github = github(&args).await?;
             let input = tokio::fs::read_to_string(file).await?;
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct TomlRoster {
-                students: Vec<RosterRow>,
-            }
-            let rows: Vec<RosterRow> = if file.extension().is_some_and(|ext| ext == "toml") {
-                toml::from_str::<TomlRoster>(&input)?.students
-            } else {
-                csv::Reader::from_reader(input.as_bytes())
-                    .deserialize()
-                    .collect::<Result<_, _>>()?
-            };
+            let rows = parse_roster(&input, file.extension().is_some_and(|ext| ext == "toml"))?;
             let mut resolved = Vec::new();
             for row in rows {
                 let account = github.resolve(&row.github_username).await?;
@@ -478,6 +475,21 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_roster(input: &str, toml: bool) -> Result<Vec<RosterRow>> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TomlRoster {
+        students: Vec<RosterRow>,
+    }
+    if toml {
+        Ok(toml::from_str::<TomlRoster>(input)?.students)
+    } else {
+        Ok(csv::Reader::from_reader(input.as_bytes())
+            .deserialize()
+            .collect::<Result<_, _>>()?)
+    }
 }
 
 async fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -634,4 +646,85 @@ async fn select_submission(pool: &PgPool, event: Uuid, reason: &str) -> Result<(
         grading::enqueue_run(pool, id, true).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn administrator_commands_require_handles_and_reject_id_flags() {
+        for command in ["grant", "revoke"] {
+            let args = Args::try_parse_from([
+                "gradingctl",
+                "admin",
+                command,
+                "--github-username",
+                "martin-fink",
+                "--reason",
+                "Test",
+            ])
+            .unwrap();
+            match args.command {
+                Command::Admin {
+                    command:
+                        Admin::Grant {
+                            github_username, ..
+                        }
+                        | Admin::Revoke {
+                            github_username, ..
+                        },
+                } => assert_eq!(github_username, "martin-fink"),
+                _ => panic!("unexpected command"),
+            }
+            assert!(
+                Args::try_parse_from([
+                    "gradingctl",
+                    "admin",
+                    command,
+                    "--github-id",
+                    "17706737",
+                    "--reason",
+                    "Test"
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn student_rosters_accept_handles_but_never_supplied_github_ids() {
+        let csv = "student_id,name,github_username\nfixture,Student,martin-fink\n";
+        let toml = "[[students]]\nstudent_id = 'fixture'\nname = 'Student'\ngithub_username = 'martin-fink'\n";
+        assert_eq!(
+            parse_roster(csv, false).unwrap()[0].github_username,
+            "martin-fink"
+        );
+        assert_eq!(
+            parse_roster(toml, true).unwrap()[0].github_username,
+            "martin-fink"
+        );
+        assert!(
+            parse_roster(
+                "student_id,name,github_id\nfixture,Student,17706737\n",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            parse_roster(
+                "student_id,name,github_username,github_id\nfixture,Student,martin-fink,17706737\n",
+                false
+            )
+            .is_err()
+        );
+        assert!(parse_roster(&format!("{toml}github_id = 17706737\n"), true).is_err());
+        assert!(
+            parse_roster(
+                &toml.replace("github_username = 'martin-fink'", "github_id = 17706737"),
+                true
+            )
+            .is_err()
+        );
+    }
 }
