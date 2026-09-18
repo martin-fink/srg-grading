@@ -2,7 +2,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 check:
     cargo fmt --all -- --check
-    cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+    cargo clippy --quiet --locked --offline --workspace --all-targets -- -D warnings
 
 test:
     bash tests/database.sh
