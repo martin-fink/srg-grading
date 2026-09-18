@@ -1,27 +1,5 @@
 # Student assignment grading
 
-A Rust 2024 application for GitHub-based, individual course assignments. PostgreSQL
-stores application state and durable tasks; Axum and Askama serve a small website.
-The interface uses TUM blue (`#0065BD`), plain typography, local CSS, and ordinary
-forms. It has no frontend build step, CDN, or JavaScript dependency.
-
-This repository builds the application and its container images. Deployment lives
-in [doctor-cluster-config](https://github.com/TUM-DSE/doctor-cluster-config/blob/master/docs/grading-infrastructure.md).
-Live GitHub App permissions, Kubernetes/gVisor isolation, and the instructor-account
-pilot require deployment acceptance testing.
-
-## Try the website
-
-```sh
-nix develop
-cargo fetch --locked
-just preview
-```
-
-Open **http://127.0.0.1:8080**. Preview mode uses clearly marked example data, binds
-only to loopback, and exposes no login or mutation endpoints. For the real service,
-GitHub login and Secure cookies require HTTPS behind nginx.
-
 ## Build and validate
 
 ```sh
