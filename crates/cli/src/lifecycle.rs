@@ -272,6 +272,12 @@ async fn snapshot(context: &ContextData, id: Uuid) -> Result<()> {
             .bind(id)
             .fetch_one(&context.pool)
             .await?;
+    // Serialize the budget check and retention for this repository across workers.
+    let mut retention_lock = context.pool.acquire().await?.detach();
+    sqlx::query("SELECT pg_advisory_lock(704319,hashtext($1))")
+        .bind(repository_id.to_string())
+        .execute(&mut retention_lock)
+        .await?;
     let retained: Option<String> = sqlx::query_scalar("SELECT source_digest FROM submissions WHERE repository_id=$1 AND sha=$2 AND source_digest IS NOT NULL LIMIT 1")
         .bind(repository_id).bind(&sha).fetch_optional(&context.pool).await?;
     if let Some(hash) = retained {
@@ -283,6 +289,12 @@ async fn snapshot(context: &ContextData, id: Uuid) -> Result<()> {
         .execute(&context.pool)
         .await?;
     } else if existing.is_none() {
+        let (used, final_submission): (i64, bool) = sqlx::query_as("SELECT COALESCE((SELECT sum(a.bytes)::bigint FROM artifacts a WHERE a.digest IN (SELECT source_digest FROM submissions WHERE repository_id=$1)),0),final_submission_id IS NOT DISTINCT FROM $2 FROM student_repositories WHERE id=$1")
+            .bind(repository_id).bind(id).fetch_one(&context.pool).await?;
+        ensure!(
+            final_submission || used < 128 * 1024 * 1024,
+            grading_core::integrity::InvalidSubmission
+        );
         let repository = courses::repository(&context.pool, repository_id).await?;
         let full_name = format!("{}/{}", repository.organization, repository.name);
         context

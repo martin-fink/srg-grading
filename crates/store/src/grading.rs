@@ -54,7 +54,7 @@ pub async fn lease(pool: &PgPool, worker: &Worker, requested: &[String]) -> Resu
          AND (r.definition->'assignment'->'resources'->>'cpu')::int<=$2
          AND (r.definition->'assignment'->'resources'->>'memory_gib')::int<=$3
          AND (r.definition->'assignment'->'resources'->>'storage_gib')::int<=$4
-         AND NOT EXISTS(SELECT 1 FROM tasks busy JOIN grading_runs bg ON bg.id=(busy.payload->>'run_id')::uuid JOIN submissions bs ON bs.id=bg.submission_id JOIN submissions target ON target.id=g.submission_id WHERE busy.kind='grade' AND busy.status='leased' AND busy.lease_until>now() AND bs.repository_id=target.repository_id)
+         AND NOT EXISTS(SELECT 1 FROM tasks busy JOIN grading_runs bg ON bg.id=(busy.payload->>'run_id')::uuid JOIN submissions bs ON bs.id=bg.submission_id JOIN submissions target ON target.id=g.submission_id JOIN student_repositories br ON br.id=bs.repository_id JOIN student_repositories tr ON tr.id=target.repository_id WHERE busy.kind='grade' AND busy.status='leased' AND busy.lease_until>now() AND br.enrollment_id=tr.enrollment_id)
          ORDER BY t.priority DESC,t.available_at,t.id FOR UPDATE OF t SKIP LOCKED LIMIT 1")
         .bind(&profiles).bind(caps.cpu as i32).bind(caps.memory_gib as i32).bind(caps.storage_gib as i32).fetch_optional(&mut *tx).await?;
     let Some(id) = id else {
@@ -217,7 +217,10 @@ pub async fn enqueue_run(pool: &PgPool, submission: Uuid, regrade: bool) -> Resu
     }
     let latest: Uuid = sqlx::query_scalar("SELECT id FROM submissions WHERE repository_id=$1 ORDER BY received_at DESC,id DESC LIMIT 1").bind(repository).fetch_one(&mut *tx).await?;
     let is_final = closed && final_id == Some(submission);
-    let superseded = !regrade && !is_final && (closed || latest != submission);
+    let public_runs: i64 = sqlx::query_scalar("SELECT count(*) FROM grading_runs g JOIN submissions s ON s.id=g.submission_id WHERE s.repository_id=$1 AND g.public_run_id IS NULL AND g.status<>'superseded'")
+        .bind(repository).fetch_one(&mut *tx).await?;
+    let superseded =
+        !regrade && !is_final && (closed || latest != submission || public_runs >= 200);
     let attempt: i32 = sqlx::query_scalar(
         "SELECT COALESCE(max(attempt),0)+1 FROM grading_runs WHERE submission_id=$1",
     )

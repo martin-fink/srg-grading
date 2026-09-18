@@ -22,3 +22,5 @@ GRANT INSERT ON audit_events TO grading_admin;
 GRANT USAGE ON SEQUENCE audit_events_id_seq TO grading_admin, grading_operator;
 GRANT USAGE ON SEQUENCE reconciliation_observations_id_seq TO grading_operator;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+
+GRANT SELECT, INSERT, UPDATE ON submission_admission TO grading_web;

@@ -7,6 +7,12 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+/// Reserve before any GitHub call; shared across web processes and sessions.
+pub async fn admit_registration(pool: &PgPool, github_id: i64) -> Result<bool> {
+    Ok(sqlx::query("INSERT INTO submission_admission(github_id,next_allowed_at) VALUES($1,now()+interval '5 seconds') ON CONFLICT(github_id) DO UPDATE SET next_allowed_at=EXCLUDED.next_allowed_at WHERE submission_admission.next_allowed_at<=now()")
+        .bind(github_id).execute(pool).await?.rows_affected() == 1)
+}
+
 pub async fn record(
     tx: &mut Transaction<'_, Postgres>,
     repository: Uuid,
@@ -31,6 +37,13 @@ pub async fn record(
                 .await?;
         }
         return Ok(None);
+    }
+    let latest: Option<(Uuid, String)> = sqlx::query_as("SELECT id,sha FROM submissions WHERE repository_id=$1 ORDER BY received_at DESC,id DESC LIMIT 1")
+        .bind(repository).fetch_optional(&mut **tx).await?;
+    if let Some((id, previous)) = latest
+        && previous == sha
+    {
+        return Ok(Some(id));
     }
     let id = Uuid::new_v4();
     sqlx::query(
@@ -61,9 +74,11 @@ pub async fn schedule_snapshots(
         .bind(enrollment.to_string())
         .execute(&mut **tx)
         .await?;
+    sqlx::query("UPDATE tasks SET status='cancelled',updated_at=now() WHERE kind='snapshot' AND status='pending' AND payload->>'submission_id' IN (SELECT s.id::text FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE r.enrollment_id=$1 AND s.id IS DISTINCT FROM r.final_submission_id AND s.id<>(SELECT newest.id FROM submissions newest WHERE newest.repository_id=r.id ORDER BY newest.received_at DESC,newest.id DESC LIMIT 1))")
+        .bind(enrollment).execute(&mut **tx).await?;
     let active: i64 = sqlx::query_scalar("SELECT count(*) FROM tasks t JOIN submissions s ON s.id=(t.payload->>'submission_id')::uuid JOIN student_repositories r ON r.id=s.repository_id WHERE t.kind='snapshot' AND t.status IN ('pending','leased') AND r.enrollment_id=$1").bind(enrollment).fetch_one(&mut **tx).await?;
-    let pending: Vec<(Uuid,bool)> = sqlx::query_as("SELECT s.id,s.id IS NOT DISTINCT FROM r.final_submission_id FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE r.enrollment_id=$1 AND s.source_digest IS NULL AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.dedup_key='snapshot:'||s.id::text) ORDER BY (s.id IS NOT DISTINCT FROM r.final_submission_id) DESC,s.received_at DESC LIMIT $2")
-        .bind(enrollment).bind((32-active).max(0)).fetch_all(&mut **tx).await?;
+    let pending: Vec<(Uuid,bool)> = sqlx::query_as("SELECT s.id,s.id IS NOT DISTINCT FROM r.final_submission_id FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE r.enrollment_id=$1 AND s.source_digest IS NULL AND (s.id=r.final_submission_id OR (NOT r.closure_due AND s.id=(SELECT newest.id FROM submissions newest WHERE newest.repository_id=r.id ORDER BY newest.received_at DESC,newest.id DESC LIMIT 1))) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.dedup_key='snapshot:'||s.id::text) ORDER BY (s.id IS NOT DISTINCT FROM r.final_submission_id) DESC,s.received_at DESC LIMIT $2")
+        .bind(enrollment).bind((8-active).max(0)).fetch_all(&mut **tx).await?;
     for (id, final_submission) in pending {
         queue::enqueue(
             tx,
@@ -78,7 +93,7 @@ pub async fn schedule_snapshots(
 }
 
 pub async fn refill_snapshots(pool: &PgPool) -> Result<()> {
-    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT s.repository_id FROM submissions s WHERE s.source_digest IS NULL AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.dedup_key='snapshot:'||s.id::text) LIMIT 100").fetch_all(pool).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT DISTINCT s.repository_id FROM submissions s JOIN student_repositories r ON r.id=s.repository_id WHERE s.source_digest IS NULL AND (s.id=r.final_submission_id OR (NOT r.closure_due AND s.id=(SELECT newest.id FROM submissions newest WHERE newest.repository_id=r.id ORDER BY newest.received_at DESC,newest.id DESC LIMIT 1))) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.dedup_key='snapshot:'||s.id::text) LIMIT 100").fetch_all(pool).await?;
     for id in ids {
         let mut tx = pool.begin().await?;
         schedule_snapshots(&mut tx, id).await?;
@@ -101,7 +116,7 @@ pub async fn close(pool: &PgPool, repository: Uuid) -> Result<()> {
         .execute(&mut *tx)
         .await?;
         if let Some(submission) = submission {
-            sqlx::query("UPDATE tasks SET priority=100 WHERE (kind='snapshot' AND payload->>'submission_id'=$1) OR (kind='grade' AND payload->>'run_id' IN (SELECT id::text FROM grading_runs WHERE submission_id=$2))")
+            sqlx::query("UPDATE tasks SET priority=100,status=CASE WHEN status IN ('failed','cancelled') THEN 'pending' ELSE status END,attempts=CASE WHEN status IN ('failed','cancelled') THEN 0 ELSE attempts END,available_at=now() WHERE (kind='snapshot' AND payload->>'submission_id'=$1) OR (kind='grade' AND payload->>'run_id' IN (SELECT id::text FROM grading_runs WHERE submission_id=$2))")
                 .bind(submission.to_string()).bind(submission).execute(&mut *tx).await?;
         }
     }

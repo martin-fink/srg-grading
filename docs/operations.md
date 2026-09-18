@@ -188,3 +188,15 @@ longer resets exhausted control-task retry budgets. After investigating a failur
 use `gradingctl retry-task --task UUID --reason 'Recovery explanation'` with the
 operator credential. The retry is audited; browser credentials cannot authorize it.
 Repository lock recovery remains automatic because revoking write access is required.
+
+Apply migration 0007 and updated grants before upgrading services. Portal submission
+registration is limited to one request per five seconds per GitHub account, before
+GitHub API access. Consecutive receipts of the same SHA share one submission, while
+the receipt ledger remains immutable. Only the latest pending snapshot per repository
+is fetched; obsolete pending fetches are cancelled. At most one grade per enrollment
+runs at once. Automatic public feedback is capped at 200 runs per repository;
+final grading and explicit instructor regrades remain available. Historical source retention has a 128 MiB per-repository soft budget
+(one bounded snapshot may cross it); final source capture is reserved separately and
+is not blocked by the public-feedback budget. Existing evidence is never deleted by
+this policy. Exceeding the budget requires instructor review; it does not change
+receipt eligibility or silently award a grade.

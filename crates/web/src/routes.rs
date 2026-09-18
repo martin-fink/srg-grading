@@ -68,6 +68,7 @@ impl IntoResponse for HttpError {
                 StatusCode::FORBIDDEN => "This request is not permitted.",
                 StatusCode::NOT_FOUND => "Not found.",
                 StatusCode::BAD_REQUEST => "Invalid request.",
+                StatusCode::TOO_MANY_REQUESTS => "Too many requests. Please wait before retrying.",
                 StatusCode::CONFLICT => "This operation cannot be accepted in its current state.",
                 _ => "The operation failed. Please retry or contact your instructor.",
             },
@@ -401,6 +402,9 @@ async fn submit(
     let owner: Option<i64>=sqlx::query_scalar("SELECT e.github_id FROM student_repositories r JOIN enrollments e ON e.id=r.enrollment_id WHERE r.id=$1 AND e.github_id=$2").bind(id).bind(session.github_id).fetch_optional(&state.pool).await?;
     if owner.is_none() {
         return Err(HttpError(StatusCode::NOT_FOUND));
+    }
+    if !submissions::admit_registration(&state.pool, session.github_id).await? {
+        return Err(HttpError(StatusCode::TOO_MANY_REQUESTS));
     }
     let repository = courses::repository(&state.pool, id).await?;
     if repository.state != "ready" || repository.closure_due || repository.deadline < Utc::now() {

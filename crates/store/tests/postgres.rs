@@ -70,6 +70,8 @@ async fn database_invariants_and_recovery() -> Result<()> {
         identity::session(&web, &rotated).await?.unwrap().login,
         "renamed-login"
     );
+    assert!(submissions::admit_registration(&web, 100).await?);
+    assert!(!submissions::admit_registration(&web, 100).await?);
     identity::begin_login(&web, "state", "browser", "verifier").await?;
     assert!(
         identity::consume_login(&web, "state", "other-browser")
@@ -258,6 +260,16 @@ async fn database_invariants_and_recovery() -> Result<()> {
     )
     .await?
     .unwrap();
+    let duplicate = submissions::record(
+        &mut tx,
+        repository,
+        &"c".repeat(40),
+        Utc::now(),
+        "registration",
+        None,
+    )
+    .await?;
+    assert_eq!(duplicate, Some(submission));
     let late = submissions::record(
         &mut tx,
         repository,
@@ -270,11 +282,11 @@ async fn database_invariants_and_recovery() -> Result<()> {
     assert!(late.is_none());
     tx.commit().await?;
     let mut burst = web.begin().await?;
-    for _ in 0..40 {
+    for index in 0..40 {
         submissions::record(
             &mut burst,
             repository,
-            &"c".repeat(40),
+            &format!("{index:040x}"),
             Utc::now(),
             "registration",
             None,
@@ -285,7 +297,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
         sqlx::query_scalar("SELECT count(*) FROM tasks WHERE kind='snapshot' AND status='pending'")
             .fetch_one(&mut *burst)
             .await?;
-    assert_eq!(pending, 32);
+    assert_eq!(pending, 1);
     burst.rollback().await?;
     let directory = tempfile::tempdir()?;
     let artifact_root = std::env::var_os("TEST_ARTIFACT_ROOT")
