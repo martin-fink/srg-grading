@@ -171,3 +171,14 @@ rosters, source files, or private grader output. Interactive CLI validation erro
 and preview/export output remain operator-facing and may contain private data.
 After deploying logging changes, restart the web service, background worker, and
 executor. No database migration is needed for these logging changes.
+
+## Source-fetch budgets
+
+Student snapshots are preflighted before any blob download: at most 512 files and
+8 MiB total, with a 120-second overall fetch deadline. Trusted template and grader
+imports retain the platform limits. Keep course templates within the student
+budget. The API client caches up to 512 blobs / 16 MiB of encoded data in memory;
+identical repository/commit submissions reuse retained source artifacts. Deadline
+lock tasks have a separate processing loop, so a slow snapshot does not occupy
+the only lock worker. GitHub outages/rate limits can still delay remote locks;
+receipt-time cutoff remains authoritative.

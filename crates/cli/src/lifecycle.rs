@@ -70,17 +70,22 @@ fn payload_id(task: &Task, name: &str) -> Result<Uuid> {
 }
 
 pub async fn work(context: &ContextData, once: bool) -> Result<()> {
+    if once {
+        return work_queue(context, true, &["provision", "snapshot", "publish", "lock"]).await;
+    }
+    tokio::try_join!(
+        work_queue(context, false, &["provision", "snapshot", "publish"]),
+        work_queue(context, false, &["lock"]),
+    )?;
+    Ok(())
+}
+
+async fn work_queue(context: &ContextData, once: bool, kinds: &[&str]) -> Result<()> {
     let owner = format!("control-{}", Uuid::new_v4());
     loop {
         queue::expire_exhausted(&context.pool).await?;
         submissions::refill_snapshots(&context.pool).await?;
-        if let Some(task) = queue::lease(
-            &context.pool,
-            &owner,
-            &["provision", "snapshot", "publish", "lock"],
-        )
-        .await?
-        {
+        if let Some(task) = queue::lease(&context.pool, &owner, kinds).await? {
             tracing::info!(task_id=%task.id, kind=%task.kind, attempt=task.attempts, "task leased");
             let outcome = {
                 let processing = process(context, &task).instrument(
@@ -260,7 +265,17 @@ async fn snapshot(context: &ContextData, id: Uuid) -> Result<()> {
             .bind(id)
             .fetch_one(&context.pool)
             .await?;
-    if existing.is_none() {
+    let retained: Option<String> = sqlx::query_scalar("SELECT source_digest FROM submissions WHERE repository_id=$1 AND sha=$2 AND source_digest IS NOT NULL LIMIT 1")
+        .bind(repository_id).bind(&sha).fetch_optional(&context.pool).await?;
+    if let Some(hash) = retained {
+        sqlx::query(
+            "UPDATE submissions SET source_digest=$2 WHERE id=$1 AND source_digest IS NULL",
+        )
+        .bind(id)
+        .bind(hash)
+        .execute(&context.pool)
+        .await?;
+    } else if existing.is_none() {
         let repository = courses::repository(&context.pool, repository_id).await?;
         let full_name = format!("{}/{}", repository.organization, repository.name);
         context
@@ -270,7 +285,7 @@ async fn snapshot(context: &ContextData, id: Uuid) -> Result<()> {
                 repository.github_repo_id.context("missing repository ID")?,
             )
             .await?;
-        let source: Snapshot = context.github.snapshot(&full_name, &sha).await?;
+        let source: Snapshot = context.github.student_snapshot(&full_name, &sha).await?;
         let hash = context
             .artifacts
             .put(&context.pool, "source", &serde_json::to_vec(&source)?)

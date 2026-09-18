@@ -176,6 +176,50 @@ mod tests {
         );
         server.abort();
     }
+    #[tokio::test]
+    async fn student_snapshot_rejects_large_trees_before_blobs_and_reuses_blobs() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let sha = "a".repeat(40);
+        let app = Router::new()
+            .route("/repos/course/repo/git/commits/{sha}", get(|| async {
+                Json(json!({"sha":"a".repeat(40), "tree":{"sha":"b".repeat(40)}}))
+            }))
+            .route("/repos/course/repo/git/trees/{sha}", get(|| async {
+                Json(json!({"truncated":false,"tree":[
+                    {"path":"src/a", "type":"blob","mode":"100644","sha":"c".repeat(40),"size":1},
+                    {"path":"src/b", "type":"blob","mode":"100755","sha":"c".repeat(40),"size":1}
+                ]}))
+            }))
+            .route("/repos/course/repo/git/blobs/{sha}", get(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"content":"eA==","encoding":"base64","size":1})) }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let github = GitHub::fixture(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert!(
+            github
+                .snapshot_with_limits("course/repo", &sha, 1, 1024)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            github
+                .snapshot_with_limits("course/repo", &sha, 10, 1)
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            let snapshot = github.student_snapshot("course/repo", &sha).await.unwrap();
+            assert_eq!(snapshot.files["src/b"].mode, "100755");
+            assert_eq!(snapshot.files["src/a"].bytes().unwrap(), b"x");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
 }
 
 #[derive(Deserialize)]
@@ -212,6 +256,43 @@ struct ApiBlob {
     size: usize,
 }
 
+fn validate_tree(tree: &Tree, max_files: usize, max_bytes: usize) -> Result<()> {
+    ensure!(
+        !tree.truncated && tree.tree.len() <= max_files * 2,
+        "source tree exceeds limits"
+    );
+    let mut files = 0;
+    let mut bytes = 0usize;
+    for entry in &tree.tree {
+        safe_path(&entry.path)?;
+        if entry.kind == "tree" {
+            continue;
+        }
+        files += 1;
+        let size = if entry.kind == "commit" && entry.mode == "160000" {
+            40
+        } else {
+            ensure!(
+                entry.kind == "blob"
+                    && matches!(entry.mode.as_str(), "100644" | "100755" | "120000"),
+                "unsupported Git object"
+            );
+            entry
+                .size
+                .ok_or_else(|| anyhow::anyhow!("missing blob size"))?
+        };
+        ensure!(size <= MAX_FILE_BYTES, "source file too large");
+        bytes = bytes
+            .checked_add(size)
+            .ok_or_else(|| anyhow::anyhow!("snapshot exceeds limits"))?;
+        ensure!(
+            files <= max_files && bytes <= max_bytes,
+            "snapshot exceeds limits"
+        );
+    }
+    Ok(())
+}
+
 pub fn repo_path(repository: &str) -> Result<String> {
     ensure!(
         grading_core::config::github_repository(repository),
@@ -222,6 +303,37 @@ pub fn repo_path(repository: &str) -> Result<String> {
 
 impl GitHub {
     pub async fn snapshot(&self, repository: &str, sha: &str) -> Result<Snapshot> {
+        self.snapshot_with_limits(repository, sha, MAX_FILES, MAX_SNAPSHOT_BYTES)
+            .await
+    }
+
+    /// Conservative student budgets; trusted template/grader imports retain platform limits.
+    pub async fn student_snapshot(&self, repository: &str, sha: &str) -> Result<Snapshot> {
+        self.snapshot_with_limits(repository, sha, 512, 8 * 1024 * 1024)
+            .await
+    }
+
+    async fn snapshot_with_limits(
+        &self,
+        repository: &str,
+        sha: &str,
+        files: usize,
+        bytes: usize,
+    ) -> Result<Snapshot> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            self.fetch_snapshot(repository, sha, files, bytes),
+        )
+        .await?
+    }
+
+    async fn fetch_snapshot(
+        &self,
+        repository: &str,
+        sha: &str,
+        max_files: usize,
+        max_bytes: usize,
+    ) -> Result<Snapshot> {
         ensure!(valid_hex(sha, 40), "invalid commit SHA");
         let path = repo_path(repository)?;
         let commit: Commit = self
@@ -235,10 +347,7 @@ impl GitHub {
                 None,
             )
             .await?;
-        ensure!(
-            !tree.truncated && tree.tree.len() <= MAX_FILES * 2,
-            "source tree exceeds limits"
-        );
+        validate_tree(&tree, max_files, max_bytes)?;
         let mut files = BTreeMap::new();
         let mut total = 0;
         for entry in tree.tree {
@@ -270,24 +379,46 @@ impl GitHub {
                 total <= MAX_SNAPSHOT_BYTES && files.len() < MAX_FILES,
                 "snapshot exceeds limits"
             );
-            let blob: ApiBlob = self
-                .request(
-                    Method::GET,
-                    &format!("{path}/git/blobs/{}", entry.sha),
-                    None,
-                )
-                .await?;
-            ensure!(
-                blob.encoding == "base64" && blob.size <= MAX_FILE_BYTES,
-                "invalid blob encoding or size"
-            );
-            let bytes = STANDARD.decode(blob.content.replace(['\r', '\n'], ""))?;
-            ensure!(bytes.len() == blob.size, "invalid blob size");
+            let cache_key = format!("{repository}:{}", entry.sha);
+            let cached = self.blobs.lock().await.get(&cache_key).cloned();
+            let blob = if let Some(blob) = cached {
+                blob
+            } else {
+                let blob: ApiBlob = self
+                    .request(
+                        Method::GET,
+                        &format!("{path}/git/blobs/{}", entry.sha),
+                        None,
+                    )
+                    .await?;
+                ensure!(
+                    blob.encoding == "base64" && blob.size <= MAX_FILE_BYTES,
+                    "invalid blob encoding or size"
+                );
+                let bytes = STANDARD.decode(blob.content.replace(['\r', '\n'], ""))?;
+                ensure!(
+                    bytes.len() == blob.size && Some(blob.size) == entry.size,
+                    "invalid blob size"
+                );
+                let blob = Blob {
+                    mode: entry.mode.clone(),
+                    data: STANDARD.encode(bytes),
+                };
+                let mut cache = self.blobs.lock().await;
+                if cache.len() >= 512
+                    || cache.values().map(|b| b.data.len()).sum::<usize>() + blob.data.len()
+                        > 16 * 1024 * 1024
+                {
+                    cache.clear();
+                }
+                cache.insert(cache_key, blob.clone());
+                blob
+            };
             files.insert(
                 entry.path,
                 Blob {
                     mode: entry.mode,
-                    data: STANDARD.encode(bytes),
+                    data: blob.data,
                 },
             );
         }
