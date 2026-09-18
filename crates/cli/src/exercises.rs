@@ -40,7 +40,7 @@ pub enum ExerciseCommand {
     },
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, serde::Serialize, Deserialize)]
 pub struct Register {
     /// Executor configuration and shared staging PVC, required to build cache seeds.
     #[arg(long, env = "GRADING_CACHE_CONFIG")]
@@ -160,15 +160,23 @@ pub struct CacheInput {
     recipe: Snapshot,
 }
 impl Prepared {
+    pub fn cache_key(&self) -> Result<Option<String>> {
+        self.cache
+            .as_ref()
+            .map(|input| {
+                input.config.key(
+                    &self.revision.assignment.image,
+                    &input.source,
+                    &input.recipe,
+                )
+            })
+            .transpose()
+    }
     pub async fn prepare_cache(&mut self, path: Option<&Path>, dry_run: bool) -> Result<()> {
         let Some(input) = &self.cache else {
             return Ok(());
         };
-        let key = input.config.key(
-            &self.revision.assignment.image,
-            &input.source,
-            &input.recipe,
-        )?;
+        let key = self.cache_key()?.context("missing cache input")?;
         if dry_run && path.is_none() {
             println!(
                 "Cache {key}: preparation/reuse requires --cache-config (not checked in this dry run)"
@@ -190,7 +198,7 @@ impl Prepared {
                 let seed: grading_core::caching::Seed =
                     serde_json::from_slice(&tokio::fs::read(reference).await?)?;
                 ensure!(seed.input_key == key, "cache reference mismatch");
-                grading_executor::caching::verify(&config, &seed)?;
+                grading_executor::caching::verify_async(&config, &seed).await?;
                 println!("Cache {key}: reuse {}", seed.digest);
                 self.revision
                     .grader

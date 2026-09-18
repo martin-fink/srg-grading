@@ -163,6 +163,13 @@ pub fn verify(config: &Config, seed: &Seed) -> Result<()> {
     );
     Ok(())
 }
+/// Large seed verification must not block the administration worker's heartbeat.
+pub async fn verify_async(config: &Config, seed: &Seed) -> Result<()> {
+    let config = config.clone();
+    let seed = seed.clone();
+    tokio::task::spawn_blocking(move || verify(&config, &seed)).await?
+}
+
 fn stage(snapshot: &Snapshot, path: &Path) -> Result<()> {
     snapshot.validate()?;
     fs::create_dir_all(path)?;
@@ -319,7 +326,7 @@ async fn prepare_with_client(
     if reference.exists() {
         let seed: Seed = serde_json::from_slice(&fs::read(&reference)?)?;
         ensure!(seed.input_key == key, "cache reference key mismatch");
-        verify(config, &seed)?;
+        verify_async(config, &seed).await?;
         println!("Cache ready (reused): {}", seed.digest);
         return Ok(seed);
     }
@@ -343,6 +350,12 @@ async fn prepare_with_client(
     fs::create_dir_all(build.join("output"))?;
     fs::set_permissions(&build, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(build.join("output"), fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        build.join("metadata.json"),
+        serde_json::to_vec(
+            &json!({"input_key":key,"job":name,"namespace":config.namespace,"started_at":chrono::Utc::now()}),
+        )?,
+    )?;
     stage(source, &build.join("source"))?;
     stage(recipe, &build.join("recipe"))?;
     println!(
@@ -391,6 +404,14 @@ async fn prepare_with_client(
     // Diagnostic collection is best effort and must never prevent sandbox cleanup.
     let _ = tokio::time::timeout(Duration::from_secs(20), async {
         for pod in pods.list(&selector).await?.items {
+            if let Some(status)=&pod.status {
+                let states:Vec<_>=status.container_statuses.iter().flatten().map(|container|{
+                    let state=container.state.as_ref();
+                    json!({"name":container.name,"waiting_reason":state.and_then(|s|s.waiting.as_ref()).and_then(|s|s.reason.as_ref()),"termination_reason":state.and_then(|s|s.terminated.as_ref()).and_then(|s|s.reason.as_ref()),"exit_code":state.and_then(|s|s.terminated.as_ref()).map(|s|s.exit_code)})
+                }).collect();
+                let conditions:Vec<_>=status.conditions.iter().flatten().map(|c|json!({"type":c.type_,"status":c.status,"reason":c.reason})).collect();
+                fs::write(build.join("status.json"),serde_json::to_vec_pretty(&json!({"phase":status.phase,"reason":status.reason,"conditions":conditions,"containers":states}))?)?;
+            }
             if let Some(name) = pod.metadata.name {
                 let log = pods
                     .logs(
@@ -426,7 +447,13 @@ async fn prepare_with_client(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
         fs::rename(path, exports.join(&artifact.name))?;
     }
-    let bytes = manifest(&exports, caching, &key, true)?;
+    let capture_root = exports.clone();
+    let capture_config = caching.clone();
+    let capture_key = key.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        manifest(&capture_root, &capture_config, &capture_key, true)
+    })
+    .await??;
     let hash = digest(&bytes);
     File::open(&exports)?.sync_all()?;
     let destination = root.join("caches").join(&hash);
@@ -443,7 +470,7 @@ async fn prepare_with_client(
         namespace: config.namespace.clone(),
         source_pvc: config.source_pvc.clone(),
     };
-    verify(config, &seed)?;
+    verify_async(config, &seed).await?;
     let temp = root.join("cache-refs").join(format!("{key}.{id}.tmp"));
     fs::write(&temp, serde_json::to_vec(&seed)?)?;
     File::open(&temp)?.sync_all()?;
