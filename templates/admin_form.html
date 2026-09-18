@@ -1,12 +1,54 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ action.title }} · Administration</title><link rel="stylesheet" href="/static/style.css"></head><body>
-<header><div class="bar"><a class="brand" href="/admin">Grading administration</a><nav><span>{{ login }}</span><a href="/admin">All actions</a></nav></div></header>
-<main><h1>{{ action.title }}</h1><p>{{ action.description }}</p>
-{% if !error.is_empty() %}<div class="notice error" role="alert"><h2>Validation could not start</h2><pre class="execution-log">{{ error }}</pre><p>Correct the input below and validate again. Nothing was applied.</p></div>{% endif %}
-<form method="post" action="/admin/actions/{{ action.id }}" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf }}">
-{% for field in fields %}<label>{{ field.label }}{% if field.name == "format" %}<select name="field_format"><option value="csv"{% if field.value == "csv" %} selected{% endif %}>CSV</option><option value="toml"{% if field.value == "toml" %} selected{% endif %}>TOML</option></select>{% else if field.name == "existing" || field.name == "recovery_override" %}<select name="field_{{ field.name }}"><option value="false">No</option><option value="true"{% if field.value == "true" %} selected{% endif %}>Yes</option></select>{% else %}<input name="field_{{ field.name }}" value="{{ field.value }}" maxlength="2048">{% endif %}</label>{% endfor %}
-{% if action.content %}<label>Upload a UTF-8 text file (up to 1 MiB)<input type="file" name="upload" accept=".toml,.csv,.txt,text/plain,text/csv"></label>
-<label>Or paste its contents<textarea class="code-input" name="content" rows="16" spellcheck="false" autocapitalize="off" autocomplete="off">{{ content }}</textarea></label>
-{% if !action.example.is_empty() %}<details><summary>Show example input</summary><pre class="execution-log">{{ action.example }}</pre></details>{% endif %}{% endif %}
-<label>Reason for this action<input name="reason" value="{{ reason }}" required maxlength="2048"></label>
-<p class="notice">First we run validation. Review its output, then confirm to apply. No course, roster or grade changes happen during validation.</p>
-<button type="submit">Validate and preview</button> <a href="/admin">Cancel</a></form></main></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ action.title }} · Administration</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+    <div class="bar"><a class="brand" href="/admin">Grading administration</a>
+        <nav><span>{{ login }}</span><a href="/admin">All actions</a></nav>
+    </div>
+</header>
+<main><h1>{{ action.title }}</h1>
+    <p>{{ action.description }}</p>
+    {% if !error.is_empty() %}
+    <div class="notice error" role="alert"><h2>Validation could not start</h2>
+        <pre class="execution-log">{{ error }}</pre>
+        <p>Correct the input below and validate again. Nothing was applied.</p></div>
+    {% endif %}
+    <form method="post" action="/admin/actions/{{ action.id }}" enctype="multipart/form-data"><input type="hidden"
+                                                                                                     name="csrf"
+                                                                                                     value="{{ csrf }}">
+        {% for field in fields %}<label>{{ field.label }}{% if field.name == "format" %}<select name="field_format">
+            <option value="csv" {% if field.value==
+            "csv" %} selected{% endif %}>CSV</option>
+            <option value="toml" {% if field.value==
+            "toml" %} selected{% endif %}>TOML</option></select>{% else if field.name == "existing" || field.name ==
+            "recovery_override" %}<select name="field_{{ field.name }}">
+                <option value="false">No</option>
+                <option value="true" {% if field.value==
+                "true" %} selected{% endif %}>Yes</option></select>{% else %}<input name="field_{{ field.name }}"
+                                                                                    value="{{ field.value }}"
+                                                                                    maxlength="2048">{% endif %}</label>{%
+        endfor %}
+        {% if action.content %}<label>Upload a UTF-8 text file (up to 1 MiB)<input type="file" name="upload"
+                                                                                   accept=".toml,.csv,.txt,text/plain,text/csv"></label>
+        <label>Or paste its contents<textarea class="code-input" name="content" rows="16" spellcheck="false"
+                                              autocapitalize="off" autocomplete="off">{{ content }}</textarea></label>
+        {% if !action.example.is_empty() %}
+        <details>
+            <summary>Show example input</summary>
+            <pre class="execution-log">{{ action.example }}</pre>
+        </details>
+        {% endif %}{% endif %}
+        <label>Reason for this action<input name="reason" value="{{ reason }}" required maxlength="2048"></label>
+        <p class="notice">First we run validation. Review its output, then confirm to apply. No course, roster or grade
+            changes happen during validation.</p>
+        <button type="submit">Validate and preview</button>
+        <a href="/admin">Cancel</a></form>
+</main>
+</body>
+</html>

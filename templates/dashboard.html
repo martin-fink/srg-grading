@@ -10,7 +10,7 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 <header>
-    <div class="bar"><a class="brand" href="/">Technical University of Munich Systems · Research Group<span></span></a>
+    <div class="bar"><a class="brand" href="/">Technical University of Munich · Systems Research Group<span></span></a>
         <nav aria-label="Account">{% if authenticated %}<span>{{ login }}</span>{% if admin %}<a href="/admin">Administration</a>{%
             endif %}
             <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{ csrf }}">
@@ -26,8 +26,7 @@
     {% if !authenticated %}
     <p class="intro">View your assignments, create your repositories, and see results.</p>
     <a class="button" href="/login">Sign in with GitHub</a>
-    <p class="muted">Use the GitHub account you supplied for enrollment. Course access is managed by your
-        instructor.</p>
+    <p class="muted">Use the GitHub account you supplied for enrollment. Course access is managed by your instructor.</p>
     {% else %}
     <p class="intro">Your repositories and grading results.</p>
     {% if rows.is_empty() %}
@@ -85,9 +84,7 @@
     </section>
     {% endfor %}
     <section class="policy"><h2>How submissions work</h2>
-        <p>A push is registered when this service receives its GitHub webhook. You can also register the current branch
-            commit here before the deadline. The latest eligible registered commit is your submission. Commits received
-            after the deadline will not be considered.</p>
+        <p>A push is registered when this service receives its GitHub webhook. You can also register the current branch commit here before the deadline. The latest eligible registered commit is your submission. Commits received after the deadline will not be considered.</p>
     </section>
     {% endif %}
 </main>
