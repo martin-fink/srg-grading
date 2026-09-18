@@ -540,7 +540,18 @@ mod tests {
         )
         .unwrap();
         fs::create_dir(root.join("copy")).unwrap();
-        fs::set_permissions(root.join("copy"), fs::Permissions::from_mode(0o2770)).unwrap();
+        // Nix's build sandbox rejects setting setgid. Still check permission
+        // preservation there, and include setgid where the environment permits it.
+        let copy_mode =
+            match fs::set_permissions(root.join("copy"), fs::Permissions::from_mode(0o2770)) {
+                Ok(()) => 0o2770,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    fs::set_permissions(root.join("copy"), fs::Permissions::from_mode(0o770))
+                        .unwrap();
+                    0o770
+                }
+                Err(error) => panic!("setting cache copy directory permissions: {error}"),
+            };
         let status = std::process::Command::new("python3")
             .args(["-c", include_str!("../../../scripts/copy-cache.py")])
             .arg(root.join("compiler"))
@@ -550,7 +561,7 @@ mod tests {
         assert!(status.success());
         assert_eq!(
             fs::metadata(root.join("copy")).unwrap().mode() & 0o7777,
-            0o2770
+            copy_mode
         );
         assert_eq!(
             fs::metadata(root.join("copy/tool")).unwrap().mode() & 0o777,
