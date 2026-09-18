@@ -5,6 +5,16 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// A source-policy violation cannot be fixed by retrying the same commit.
+#[derive(Debug)]
+pub struct InvalidSubmission;
+impl std::fmt::Display for InvalidSubmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("source violates submission limits")
+    }
+}
+impl std::error::Error for InvalidSubmission {}
+
 pub const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_FILES: usize = 10_000;

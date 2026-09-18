@@ -182,3 +182,9 @@ identical repository/commit submissions reuse retained source artifacts. Deadlin
 lock tasks have a separate processing loop, so a slow snapshot does not occupy
 the only lock worker. GitHub outages/rate limits can still delay remote locks;
 receipt-time cutoff remains authoritative.
+
+Invalid source trees fail permanently on their first attempt. Synchronization no
+longer resets exhausted control-task retry budgets. After investigating a failure,
+use `gradingctl retry-task --task UUID --reason 'Recovery explanation'` with the
+operator credential. The retry is audited; browser credentials cannot authorize it.
+Repository lock recovery remains automatic because revoking write access is required.

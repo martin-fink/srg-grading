@@ -347,7 +347,8 @@ impl GitHub {
                 None,
             )
             .await?;
-        validate_tree(&tree, max_files, max_bytes)?;
+        validate_tree(&tree, max_files, max_bytes)
+            .map_err(|e| e.context(grading_core::integrity::InvalidSubmission))?;
         let mut files = BTreeMap::new();
         let mut total = 0;
         for entry in tree.tree {
@@ -426,7 +427,9 @@ impl GitHub {
             sha: sha.to_owned(),
             files,
         };
-        snapshot.validate_structure()?;
+        snapshot
+            .validate_structure()
+            .map_err(|e| e.context(grading_core::integrity::InvalidSubmission))?;
         Ok(snapshot)
     }
 

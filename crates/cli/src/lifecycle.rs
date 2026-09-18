@@ -122,7 +122,14 @@ async fn work_queue(context: &ContextData, once: bool, kinds: &[&str]) -> Result
                     let message = format!(
                         "stage={stage}; reason={reason}; upstream_status={upstream_status:?}"
                     );
-                    queue::fail(&context.pool, &task, &message).await?;
+                    if error
+                        .downcast_ref::<grading_core::integrity::InvalidSubmission>()
+                        .is_some()
+                    {
+                        queue::fail_permanently(&context.pool, &task).await?;
+                    } else {
+                        queue::fail(&context.pool, &task, &message).await?;
+                    }
                     if let Some(retry_at) = context.github.retry_at().await {
                         sqlx::query("UPDATE tasks SET available_at=GREATEST(available_at,$2) WHERE id=$1 AND lease_token=$3 AND status='pending'").bind(task.id).bind(retry_at).bind(task.lease_token).execute(&context.pool).await?;
                     }
@@ -363,7 +370,7 @@ pub async fn sync(context: &ContextData) -> Result<()> {
 async fn sync_inner(context: &ContextData) -> Result<()> {
     queue::expire_exhausted(&context.pool).await?;
     submissions::refill_snapshots(&context.pool).await?;
-    sqlx::query("UPDATE tasks SET status='pending',attempts=0,available_at=now() WHERE status='failed' AND kind IN ('provision','snapshot','publish','lock')").execute(&context.pool).await?;
+
     let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM student_repositories ORDER BY id")
         .fetch_all(&context.pool)
         .await?;

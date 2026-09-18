@@ -73,3 +73,25 @@ pub async fn expire_exhausted(pool: &PgPool) -> Result<()> {
     sqlx::query("UPDATE tasks SET status='failed',last_error='retry budget exhausted',updated_at=now() WHERE status='leased' AND lease_until<now() AND attempts>=8").execute(pool).await?;
     Ok(())
 }
+
+/// Terminal failures retain the original task and must be explicitly retried.
+pub async fn fail_permanently(pool: &PgPool, task: &Task) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE tasks SET status='failed',last_error='permanent submission validation failure',updated_at=now() WHERE id=$1 AND lease_token=$2 AND status='leased' AND lease_until>now()")
+        .bind(task.id).bind(task.lease_token).execute(&mut *tx).await?;
+    sqlx::query("UPDATE student_repositories SET needs_review=true WHERE id IN (SELECT repository_id FROM submissions WHERE id::text=$1)")
+        .bind(task.payload["submission_id"].as_str().unwrap_or("")).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn retry(pool: &PgPool, task: Uuid, operator: &str, reason: &str) -> Result<()> {
+    ensure!(!reason.trim().is_empty(), "retry reason required");
+    let mut tx = pool.begin().await?;
+    let changed = sqlx::query("UPDATE tasks SET status='pending',attempts=0,available_at=now(),updated_at=now() WHERE id=$1 AND status='failed' AND kind IN ('snapshot','publish','provision','lock')")
+        .bind(task).execute(&mut *tx).await?.rows_affected();
+    ensure!(changed == 1, "task is not a failed control task");
+    crate::submissions::audit(&mut tx, operator, "task.retry", task, reason).await?;
+    tx.commit().await?;
+    Ok(())
+}

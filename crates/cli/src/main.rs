@@ -80,6 +80,12 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+    RetryTask {
+        #[arg(long)]
+        task: Uuid,
+        #[arg(long)]
+        reason: String,
+    },
     Work {
         #[arg(long)]
         once: bool,
@@ -204,6 +210,7 @@ async fn main() -> Result<()> {
         Command::Roster { .. } => "roster_import",
         Command::Worker { .. } => "worker",
         Command::Grades { .. } => "grade_export",
+        Command::RetryTask { .. } => "task_retry",
         Command::Extension { .. } => "extension",
         Command::Regrade { .. } => "regrade",
         Command::SelectSubmission { .. } => "submission_override",
@@ -393,6 +400,9 @@ async fn run(args: Args) -> Result<()> {
                 },
                 resolved.len()
             );
+        }
+        Command::RetryTask { task, reason } => {
+            grading_store::queue::retry(&pool(&args).await?, *task, &operator(), reason).await?;
         }
         Command::Worker { command } => {
             let pool = pool(&args).await?;

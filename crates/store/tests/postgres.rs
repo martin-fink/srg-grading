@@ -459,6 +459,29 @@ async fn database_invariants_and_recovery() -> Result<()> {
             .fetch_one(&pool)
             .await?;
     assert_eq!(status, "failed");
+    queue::retry(
+        &operator,
+        sqlx::query_scalar("SELECT id FROM tasks WHERE dedup_key='failed-fixture'")
+            .fetch_one(&pool)
+            .await?,
+        "test",
+        "Recovered infrastructure",
+    )
+    .await?;
+    let task = queue::lease(&pool, "terminal-test", &["lock"])
+        .await?
+        .unwrap();
+    queue::fail_permanently(&pool, &task).await?;
+    assert!(
+        queue::retry(&web, task.id, "student", "unauthorized")
+            .await
+            .is_err()
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id=$1")
+        .bind(task.id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(status, "failed");
     exercises::publication_rollout_and_permissions().await?;
     Ok(())
 }
