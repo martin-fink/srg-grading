@@ -6,6 +6,14 @@ That repository owns Kubernetes resources, nginx, certificates, secret provision
 storage, service timers, backups, and monitoring.
 This repository supplies Rust binaries, migrations, and Nix-built container images.
 
+## Administrator portal
+
+Routine course, roster, exercise and grading administration is now available under
+`/admin`, using **Validate and preview → Confirm and apply**. Deploy migration 0008
+and the supervised administration worker before enabling this workflow. See
+[portal setup, credentials and recovery](admin-portal.md). The public web role remains
+unprivileged; owner/admin connections and Kubernetes access belong only to that worker.
+
 ## Native services and runtime credentials
 
 The cluster installs the Rust binaries from the public HTTPS flake input. PostgreSQL,
@@ -50,7 +58,8 @@ or retry a fresh login accordingly. Unknown error strings, descriptions, respons
 bodies and all authentication values are discarded, never logged.
 
 Migrations apply schema and grants using the owner OS/database account before
-web/tasks start. Administration uses the real application binary directly on Astrid:
+web/tasks start. Bootstrap the first administrator using the real application binary
+on Astrid; later membership changes can use the portal:
 
 ```sh
 sudo -u grading-admin gradingctl --database-url-file /etc/grading/admin.url \

@@ -6,6 +6,12 @@ configures one approved registry namespace and resource/time caps.
 
 ## Instructor workflow
 
+Use **Administration → Apply exercise catalog** (or **Add exercise / Update exercise**)
+for browser-based registration. Upload/paste the catalog, validate, inspect pinned
+commits and cache requirements, then confirm. The administration worker handles cache
+preparation and atomic publication. See [portal operations](admin-portal.md).
+
+The equivalent CLI workflow below remains available for recovery and automation.
 Run registration using the operator CLI on the host with the application's artifact
 volume (currently Astrid). Schema version 3 does not build or push images. Set the
 operator DB and GitHub App configuration as described in [operations](operations.md).

@@ -64,15 +64,24 @@ the `.#` build commands.
 | `core` | Strict config, bounded Git snapshots, SHA-256 manifests, worker protocol |
 | `store` | Migrations, sessions, imports, score views, durable leases, artifact metadata |
 | `github` | App JWTs/tokens, PKCE authorization, repository APIs, Checks |
-| `web` | Login, assignment dashboard, forms, plain-text reports, worker listener |
+| `web` | Login, student dashboard, administrator forms and review pages, reports, worker listener |
 | `executor` | Runner approval, gVisor Jobs, trusted script scoring |
-| `cli` | Imports, admin changes, queue processing, synchronization, exports |
+| `cli` | Privileged administration worker, task processing, bootstrap and recovery commands |
 
 The three binaries are `grading-web`, `gradingctl`, and `grading-executor`.
 See [operations](docs/operations.md), [hardening rollout](docs/hardening.md), [grading protocol](docs/grading.md), and
 [pilot acceptance](docs/acceptance.md) before connecting external systems.
 
 ## Administration
+
+Use **Administration** (`/admin`) after signing in. Course, roster and exercise imports
+accept file uploads or pasted text. Every action validates first, shows its output,
+and requires explicit confirmation before application. See the [portal workflow and
+worker setup](docs/admin-portal.md) for all actions and diagnostics.
+
+The commands below remain available for bootstrap and recovery. Routine instructor
+work happens in the portal; a supervised `gradingctl admin-work` service executes
+confirmed operations outside the public web process.
 
 Credentials are read from runtime files, not flags containing passwords. The
 `GRADING_DATABASE_URL_FILE` and `GRADING_GITHUB_CONFIG` environment variables may
@@ -106,9 +115,12 @@ imports likewise require `github_username`, resolve it through GitHub, and rejec
 a supplied `github_id`. Numeric IDs remain internal identity keys so a renamed
 account does not transfer access to the next owner of its old handle.
 
-There is no HTTP grant endpoint. The last admin cannot be revoked
-without `--recovery-override`. Audit records include the operator, immutable target
-ID, reason, and timestamp. Host-root provisioning supplies the operator identity.
+The portal can request grant/revoke after validation and confirmation; the privileged
+administration worker uses the separate admin credential. The web database role cannot
+grant access directly. The last admin cannot be revoked without an explicit recovery
+override. Audit records include the operator, immutable target ID, reason, and timestamp.
+Portal operations record the authenticated GitHub ID and operation UUID; recovery CLI
+commands record the host operator identity.
 
 Course imports read the supplied local TOML file directly, including uncommitted
 edits. No Git repository is needed; the import records a SHA-256 content digest.
