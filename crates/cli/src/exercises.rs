@@ -423,6 +423,16 @@ mod tests {
     #[test]
     fn optional_cache_keeps_schema_three_and_validates_the_recipe() {
         let example = include_str!("../../../examples/shared-grader/exercise.toml");
+        let cached: Definition = toml::from_str(example).unwrap();
+        cached.validate().unwrap();
+        assert_eq!(
+            cached.caching.as_ref().unwrap().artifacts[0].mount_path,
+            "/cache/launcher"
+        );
+        let example = example.split("\n[caching]").next().unwrap();
+        let uncached: Definition = toml::from_str(example).unwrap();
+        uncached.validate().unwrap();
+        assert!(uncached.caching.is_none());
         let cache = r#"
 [caching]
 version=1

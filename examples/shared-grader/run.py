@@ -9,7 +9,8 @@ def run(case):
     response = subprocess.check_output([
         "/platform/grading-run", "--stdin", "/tmp/input", "--",
         "/bin/sh", "-c",
-        "/bin/cc src/main.c -o /workspace/program && /workspace/program",
+        "/bin/cc -Dmain=student_main src/main.c /cache/launcher/launcher.o "
+        "-o /workspace/program && /workspace/program",
     ], text=True)
     execution = json.loads(response)
     return (

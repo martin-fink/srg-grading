@@ -15,3 +15,21 @@ storage_gib = 1
 [workflow]
 public_command = ["/bin/python3", "/grader/public.py"]
 private_command = ["/bin/python3", "/grader/private.py"]
+
+[caching]
+version = 1
+recipe_dir = "cache"
+command = ["/bin/bash", "/recipe/prepare.sh"]
+timeout_seconds = 60
+
+[caching.resources]
+cpu = 1
+memory_gib = 1
+storage_gib = 1
+
+[[caching.artifacts]]
+name = "launcher"
+path = "launcher"
+mount_path = "/cache/launcher"
+mode = "read_only"
+max_size_gib = 1

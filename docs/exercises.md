@@ -168,7 +168,8 @@ This creates another run. Historical run definitions, source SHAs and results re
 ## Script-based grader repository contract
 
 Use [the shared-runner grader](../examples/shared-grader/) and
-[student template](../examples/scripted-template/) as a starting point. Its `exercise.toml` contains:
+[student template](../examples/scripted-template/) as a starting point. Its `exercise.toml` has the following core settings, plus
+a small [cache recipe](../examples/shared-grader/README.md) for testing preparation and reuse:
 
 ```toml
 schema_version = 3
