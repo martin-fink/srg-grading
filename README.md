@@ -161,9 +161,3 @@ be editable. Reference solutions and private tests belong in the private grader
 repository. Student repository Actions remain disabled; public feedback comes from
 the portal. Pin dependencies in the approved runner image.
 
-## Design references
-
-- [TUM corporate design](https://portal.mytum.de/corporatedesign/folder_listing)
-- [GitHub App authorization and PKCE](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app)
-- [GitHub repository APIs](https://docs.github.com/en/rest/repos/repos)
-- [SQLx offline mode](https://docs.rs/sqlx/latest/sqlx/macro.query.html)
