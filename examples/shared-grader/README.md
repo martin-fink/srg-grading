@@ -12,6 +12,28 @@ Private grading is manually scheduled after the effective deadline and halves th
 original public score if extra inputs fail. Student private reports contain only
 score/status; detailed reasons are instructor-only.
 
+## Public-test integrity
+
+Both grading phases verify the SHA-256 of `/submission/tests/public.json` before
+running student code. The expected digest lives in `integrity.py` in the private,
+instructor-owned grader repository. Missing, unreadable, or modified public tests
+receive zero points and a diagnostic reason. The public grader parses the exact
+bytes it verified, including the test point values. Touching the file is harmless;
+any byte change, including whitespace or line endings, fails verification.
+
+Check this locally without a compiler, database, or cluster:
+
+```sh
+python3 examples/check-public-tests.py
+```
+
+When intentionally changing the public tests, run
+`sha256sum examples/scripted-template/tests/public.json` from the platform checkout
+and update `PUBLIC_TESTS_SHA256` in `integrity.py`. Publish the matching template and
+grader revisions together. Do not load the expected digest from the student
+repository. This example protects its single public test file; if you add more
+public test files, pin and verify each one before using it.
+
 ## Quick cache check
 
 This example enables optional `[caching]` in schema 3. The recipe compiles

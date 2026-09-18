@@ -15,3 +15,7 @@ Local edits to a grader checkout do not change a previously pinned remote commit
 
 For a local cache smoke test without a database or cluster, run
 `python3 examples/check-caching.py` from the platform checkout.
+
+Run `python3 examples/check-public-tests.py` to check that the grader awards zero
+for modified or missing public tests. The expected SHA-256 is pinned in the private
+grader; see `shared-grader/README.md` for intentionally updating it.
