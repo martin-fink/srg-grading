@@ -149,6 +149,11 @@ fn script_controller_and_student_commands_have_separate_mounts() {
     );
     assert_eq!(pod["containers"][0]["env"][0]["value"], "10");
     assert_eq!(student["spec"]["activeDeadlineSeconds"], 15);
+    assert_eq!(
+        pod["containers"][0]["env"][1]["name"],
+        "GRADING_SANDBOX_LIMITS"
+    );
+    assert_eq!(pod["containers"][0]["env"][1]["value"], "1");
     assert!(pod["containers"][0].get("envFrom").is_none());
     config.registry.as_mut().unwrap().runner_images.clear();
     assert!(controller_job(&config, &lease, 60).is_err());

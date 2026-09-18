@@ -266,7 +266,7 @@ pub fn execution_job(
     ];
     command.extend(request.command.clone());
     container["command"] = json!(command);
-    container["env"] = json!([{"name":"GRADING_EXECUTION_TIMEOUT", "value":request.timeout_seconds.min(remaining.saturating_sub(5).max(1)).to_string()}]);
+    container["env"] = json!([{"name":"GRADING_EXECUTION_TIMEOUT", "value":request.timeout_seconds.min(remaining.saturating_sub(5).max(1)).to_string()}, {"name":"GRADING_SANDBOX_LIMITS", "value":"1"}]);
     container["volumeMounts"][1]["subPath"] =
         json!(format!("runs/{}/requests/{id}", lease.lease_token.simple()));
     Ok(serde_json::from_value(value)?)

@@ -148,3 +148,11 @@ output overflow, student OOM and abnormal capture termination return a nonzero
 successful output or automatic infrastructure retries. Graders must check the exit
 code before comparing stdout. The overall grading deadline and controller failures
 still produce an unresolved run requiring instructor attention.
+
+Student commands also inherit hard limits of 128 processes, 256 open descriptors,
+and no core dumps. These limits are installed before exec, never raised above a
+stricter inherited host limit, and cannot be increased by unprivileged student code.
+They complement node PID limits; live gVisor enforcement still requires acceptance
+checking. The capture supervisor is non-dumpable and remains outside the child’s
+rlimits. Students can still signal it; abnormal termination is a failed execution
+and its output envelope is never accepted as success.

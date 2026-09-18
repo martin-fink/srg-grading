@@ -150,6 +150,33 @@ mod tests {
         assert_eq!(result["exit_code"], 2);
     }
     #[test]
+    fn student_descriptor_exhaustion_is_confined_to_the_child() {
+        let child = "import os,resource; files=[]\ntry:\n while True: files.append(open('/dev/null'))\nexcept OSError:\n print(len(files)); print(resource.getrlimit(resource.RLIMIT_NPROC)[1]); print(resource.getrlimit(resource.RLIMIT_CORE)[1])";
+        let output = std::process::Command::new("python3")
+            .env("GRADING_SANDBOX_LIMITS", "1")
+            .args([
+                "-c",
+                include_str!("../../../scripts/capture-execution.py"),
+                "python3",
+                "-c",
+                child,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let result = decode_output(0, std::str::from_utf8(&output.stdout).unwrap()).unwrap();
+        assert_eq!(result.exit_code, 0);
+        let limits: Vec<usize> = result
+            .stdout
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+        assert!(limits[0] <= 256);
+        assert!(limits[1] <= 128);
+        assert_eq!(limits[2], 0);
+    }
+
+    #[test]
     fn execution_timeout_kills_children_even_with_closed_output() {
         for child in [
             "import time; time.sleep(30)",

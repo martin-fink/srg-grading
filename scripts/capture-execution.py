@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import os
+import resource
 import selectors
 import signal
 import time
@@ -15,6 +16,19 @@ libc = ctypes.CDLL(None, use_errno=True)
 if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
     raise OSError(ctypes.get_errno(), "cannot protect execution supervisor")
 
+def student_limits():
+    # Installed before exec, so student code cannot raise these hard limits.
+    # Keep the supervisor outside the student's descriptor/process allowance.
+    if os.environ.get("GRADING_SANDBOX_LIMITS") == "1":
+        for kind, maximum in [(resource.RLIMIT_NPROC, 128),
+                              (resource.RLIMIT_NOFILE, 256),
+                              (resource.RLIMIT_CORE, 0)]:
+            _, hard = resource.getrlimit(kind)
+            if hard != resource.RLIM_INFINITY:
+                maximum = min(maximum, hard)
+            resource.setrlimit(kind, (maximum, maximum))
+
+
 LIMIT = 65536
 buffers = {"stdout": bytearray(), "stderr": bytearray()}
 exit_code = 127
@@ -22,7 +36,8 @@ failure = None
 deadline = time.monotonic() + float(os.environ.get("GRADING_EXECUTION_TIMEOUT", "30"))
 try:
     process = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=True)
+                               stderr=subprocess.PIPE, start_new_session=True,
+                               preexec_fn=student_limits)
     with selectors.DefaultSelector() as selector:
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
