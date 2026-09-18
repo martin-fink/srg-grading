@@ -109,7 +109,9 @@ async fn serve(
 ) -> Result<RunStatus> {
     let mut handled = HashMap::new();
     loop {
-        if let Some(bytes) = read_request(&directory.join("control/request.json"))? {
+        if let Some(bytes) = read_request(&directory.join("control/request.json"))
+            .context(Stage("workflow_request_read"))?
+        {
             let request: ExecutionRequest =
                 serde_json::from_slice(&bytes).context(Stage("workflow_request_decode"))?;
             request
@@ -199,7 +201,16 @@ fn read_request(path: &Path) -> Result<Option<Vec<u8>>> {
     }
     let file = match options.open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // NFS delegation recalls can make a nonblocking local open return
+        // EAGAIN. Retry on the next poll without weakening the file checks.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(e) => return Err(e.into()),
     };
     ensure!(
@@ -207,7 +218,11 @@ fn read_request(path: &Path) -> Result<Option<Vec<u8>>> {
         "execution request must be a regular file"
     );
     let mut bytes = Vec::new();
-    file.take(1_048_577).read_to_end(&mut bytes)?;
+    match file.take(1_048_577).read_to_end(&mut bytes) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
     ensure!(bytes.len() <= 1_048_576, "execution request exceeds limit");
     Ok(Some(bytes))
 }
