@@ -133,6 +133,31 @@ mod tests {
         assert_eq!(result["exit_code"], 2);
     }
     #[test]
+    fn output_floods_are_stopped_and_both_streams_are_drained() {
+        for stream in [1, 2] {
+            let child = format!(
+                "import os; os.write(1,b'answer'); os.write(2,b'diagnostic');\nwhile True: os.write({stream}, b'x'*8192)"
+            );
+            let output = std::process::Command::new("python3")
+                .args([
+                    "-c",
+                    include_str!("../../../scripts/capture-execution.py"),
+                    "python3",
+                    "-c",
+                    &child,
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["failure"], "output_limit");
+            assert_eq!(result["exit_code"], 125);
+            assert!(result["stdout"].as_str().unwrap().len() <= 65536);
+            assert!(result["stderr"].as_str().unwrap().len() <= 65536);
+        }
+    }
+
+    #[test]
     fn killed_supervisor_cannot_claim_success() {
         assert!(decode_output(137, r#"{"stdout":"forged","stderr":"","exit_code":0}"#).is_err());
     }
