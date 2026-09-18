@@ -335,3 +335,49 @@ pub async fn enqueue_private(
     }
     Ok(outcomes)
 }
+
+/// Retry a failed private run without changing its pinned grader or public baseline.
+pub async fn retry_private(
+    pool: &PgPool,
+    failed: Uuid,
+    operator: &str,
+    reason: &str,
+) -> Result<Uuid> {
+    ensure!(!reason.trim().is_empty(), "private retry reason required");
+    let mut tx = pool.begin().await?;
+    let (repository, submission): (Uuid, Uuid) = sqlx::query_as("SELECT s.repository_id,s.id FROM grading_runs g JOIN submissions s ON s.id=g.submission_id WHERE g.id=$1")
+        .bind(failed).fetch_one(&mut *tx).await?;
+    sqlx::query("SELECT id FROM student_repositories WHERE id=$1 FOR UPDATE")
+        .bind(repository)
+        .execute(&mut *tx)
+        .await?;
+    let (latest, status, revision, baseline, attempt): (Uuid, String, String, Option<Uuid>, i32) = sqlx::query_as("SELECT id,status,revision_digest,public_run_id,attempt FROM grading_runs WHERE submission_id=$1 ORDER BY attempt DESC LIMIT 1")
+        .bind(submission).fetch_one(&mut *tx).await?;
+    ensure!(
+        latest == failed
+            && baseline.is_some()
+            && matches!(status.as_str(), "infrastructure_failed" | "timed_out"),
+        "only the latest failed private run can be retried"
+    );
+    let run = Uuid::new_v4();
+    sqlx::query("INSERT INTO grading_runs(id,submission_id,revision_digest,attempt,public_run_id) VALUES($1,$2,$3,$4,$5)")
+        .bind(run).bind(submission).bind(revision).bind(attempt + 1).bind(baseline).execute(&mut *tx).await?;
+    queue::enqueue(
+        &mut tx,
+        "grade",
+        json!({"run_id":run}),
+        &format!("grade:{run}"),
+        100,
+    )
+    .await?;
+    crate::submissions::audit(
+        &mut tx,
+        operator,
+        "grading.private_retry",
+        run,
+        &format!("{reason}; previous_run={failed}"),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(run)
+}

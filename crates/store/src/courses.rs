@@ -237,16 +237,35 @@ pub struct DashboardRow {
     pub points: Option<i32>,
     pub public_points: Option<i32>,
     pub private_grading: bool,
+    pub private_required: bool,
     pub run_id: Option<Uuid>,
     pub override_points: Option<i32>,
     pub closure_due: Option<bool>,
+}
+
+impl DashboardRow {
+    pub fn export_state(&self) -> &'static str {
+        if self.closure_due != Some(true) {
+            return "provisional";
+        }
+        if self.override_points.is_some() {
+            return "final_override";
+        }
+        if self.status.as_deref() != Some("completed") || self.points.is_none() {
+            return "unresolved";
+        }
+        if self.private_required && !self.private_grading {
+            return "private_pending";
+        }
+        "final"
+    }
 }
 
 pub async fn dashboard(pool: &PgPool, github_id: i64) -> Result<Vec<DashboardRow>> {
     Ok(sqlx::query_as(
         "SELECT a.id AS assignment_id,c.title AS course,c.organization,c.timezone,v.definition->'assignment'->>'title' AS title,v.opens_at,COALESCE(x.deadline,v.deadline) AS deadline,CASE WHEN o.points IS NOT NULL THEN COALESCE(gv.max_points,v.max_points) ELSE COALESCE(rv.max_points,gv.max_points,v.max_points) END AS max_points,
          r.id AS repository_id,r.name AS repository_name,r.state,r.invitation_url,r.locked_at,r.needs_review,r.last_error,r.closure_due,
-         s.sha,g.status,g.points,COALESCE(g.public_points,b.public_points,b.points) AS public_points,g.public_run_id IS NOT NULL AS private_grading,CASE WHEN g.report_digest IS NOT NULL THEN g.id END AS run_id,o.points AS override_points
+         s.sha,g.status,g.points,COALESCE(g.public_points,b.public_points,b.points) AS public_points,g.public_run_id IS NOT NULL AS private_grading,COALESCE(gv.definition#>'{grader,workflow,private_command}' <> 'null'::jsonb,false) AS private_required,CASE WHEN g.report_digest IS NOT NULL THEN g.id END AS run_id,o.points AS override_points
          FROM enrollments e JOIN courses c ON c.id=e.course_id JOIN assignments a ON a.course_id=c.id
          LEFT JOIN student_repositories r ON r.enrollment_id=e.id AND r.assignment_id=a.id
          JOIN assignment_revisions v ON v.digest=COALESCE(r.revision_digest,a.current_revision)

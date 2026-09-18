@@ -306,7 +306,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         "private review",
     )
     .await?;
-    let private_run = scheduled
+    let mut private_run = scheduled
         .iter()
         .find(|(id, _, _)| *id == repository)
         .unwrap()
@@ -335,6 +335,48 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
     let lease = grading::lease(&web, &worker, &worker.profiles)
         .await?
         .unwrap();
+    let failed_result = grading_core::protocol::RunResult {
+        logs: vec![],
+        schema_version: 1,
+        lease_token: lease.lease_token,
+        run_id: lease.run_id,
+        sha: lease.sha.clone(),
+        revision_digest: lease.revision_digest.clone(),
+        image: lease.revision.assignment.image.clone(),
+        resources: lease.revision.assignment.resources.clone(),
+        status: grading_core::protocol::RunStatus::TimedOut,
+        findings: vec![],
+        score: None,
+    };
+    grading::accept(&web, &artifacts, &worker, lease.task_id, &failed_result).await?;
+    // Check the repository directly rather than depending on other course rows.
+    let student: i64 = sqlx::query_scalar("SELECT e.github_id FROM enrollments e JOIN student_repositories r ON r.enrollment_id=e.id WHERE r.id=$1").bind(repository).fetch_one(&owner).await?;
+    let rows = courses::dashboard(&web, student).await?;
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.repository_id == Some(repository))
+            .unwrap()
+            .export_state(),
+        "unresolved"
+    );
+    assert!(
+        grading::retry_private(&web, private_run, "student", "retry")
+            .await
+            .is_err()
+    );
+    let previous = private_run;
+    private_run =
+        grading::retry_private(&operator, previous, "fixture", "Recovered private grader").await?;
+    assert!(
+        grading::retry_private(&operator, previous, "fixture", "duplicate retry")
+            .await
+            .is_err()
+    );
+    let lease = grading::lease(&web, &worker, &worker.profiles)
+        .await?
+        .unwrap();
+    assert_eq!(lease.run_id, private_run);
+    assert_eq!(lease.revision_digest, failed_result.revision_digest);
     let baseline = lease.baseline.as_ref().unwrap();
     assert_eq!(baseline.run_id, regrade);
     assert_eq!(baseline.points, 18);
@@ -367,6 +409,14 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             .fetch_one(&owner)
             .await?;
     assert_eq!((public, official), (18, 9));
+    let rows = courses::dashboard(&web, student).await?;
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.repository_id == Some(repository))
+            .unwrap()
+            .export_state(),
+        "final"
+    );
     let unchanged: i32 = sqlx::query_scalar("SELECT points FROM grading_runs WHERE id=$1")
         .bind(regrade)
         .fetch_one(&owner)

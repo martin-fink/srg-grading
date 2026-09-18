@@ -80,6 +80,12 @@ enum Command {
         #[arg(long)]
         reason: String,
     },
+    RetryPrivate {
+        #[arg(long)]
+        run: Uuid,
+        #[arg(long)]
+        reason: String,
+    },
     RetryTask {
         #[arg(long)]
         task: Uuid,
@@ -211,6 +217,7 @@ async fn main() -> Result<()> {
         Command::Worker { .. } => "worker",
         Command::Grades { .. } => "grade_export",
         Command::RetryTask { .. } => "task_retry",
+        Command::RetryPrivate { .. } => "private_retry",
         Command::Extension { .. } => "extension",
         Command::Regrade { .. } => "regrade",
         Command::SelectSubmission { .. } => "submission_override",
@@ -401,6 +408,12 @@ async fn run(args: Args) -> Result<()> {
                 resolved.len()
             );
         }
+        Command::RetryPrivate { run, reason } => {
+            println!(
+                "{}",
+                grading::retry_private(&pool(&args).await?, *run, &operator(), reason).await?
+            );
+        }
         Command::RetryTask { task, reason } => {
             grading_store::queue::retry(&pool(&args).await?, *task, &operator(), reason).await?;
         }
@@ -560,6 +573,8 @@ async fn export(pool: &PgPool, course: &str, output: &Path) -> Result<()> {
         "points",
         "status",
         "override",
+        "grade_state",
+        "provisional_points",
     ])?;
     for (id, student_id, name) in students {
         for row in courses::dashboard(pool, id)
@@ -567,18 +582,24 @@ async fn export(pool: &PgPool, course: &str, output: &Path) -> Result<()> {
             .into_iter()
             .filter(|row| assignment_ids.contains(&row.assignment_id))
         {
+            let grade_state = row.export_state();
+            let points = row.override_points.or(row.points);
+            let final_points = if grade_state.starts_with("final") {
+                points
+            } else {
+                None
+            };
             writer.write_record([
                 spreadsheet_safe(&student_id),
                 spreadsheet_safe(&name),
                 id.to_string(),
                 row.assignment_id.to_string(),
                 row.sha.unwrap_or_default(),
-                row.override_points
-                    .or(row.points)
-                    .map(|n| n.to_string())
-                    .unwrap_or_default(),
+                final_points.map(|n| n.to_string()).unwrap_or_default(),
                 row.status.unwrap_or_else(|| "not_submitted".into()),
                 row.override_points.is_some().to_string(),
+                grade_state.into(),
+                points.map(|n| n.to_string()).unwrap_or_default(),
             ])?;
         }
     }

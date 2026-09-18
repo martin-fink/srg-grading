@@ -289,7 +289,7 @@ async fn shared_runner_boundaries(
     app: &axum::Router,
     internal: &axum::Router,
 ) -> Result<()> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT g.id,g.submission_id FROM grading_runs g JOIN assignment_revisions v ON v.digest=g.revision_digest WHERE g.public_run_id IS NOT NULL AND v.grader_source_digest IS NOT NULL LIMIT 1").fetch_optional(pool).await?;
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as("SELECT g.id,g.submission_id FROM grading_runs g JOIN assignment_revisions v ON v.digest=g.revision_digest WHERE g.public_run_id IS NOT NULL AND v.grader_source_digest IS NOT NULL ORDER BY g.attempt DESC LIMIT 1").fetch_optional(pool).await?;
     let Some((private_run, submission)) = row else {
         anyhow::bail!(
             "shared runner fixture missing; run tests/database.sh for the complete fixture"

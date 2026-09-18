@@ -207,3 +207,15 @@ Unmarked crash leftovers are retained for the configured maximum grading duratio
 plus ten minutes before removal. A Kubernetes listing failure retains all files.
 Use a staging root dedicated to this executor configuration; all its Jobs must use
 the configured namespace. Monitor staging free space and reconciliation warnings.
+
+Retry an unresolved private run with
+`gradingctl retry-private --run UUID --reason 'Recovered infrastructure'`. This
+creates an audited new attempt with the same grader revision and public baseline;
+the failed attempt and report stay immutable. Only the latest failed private attempt
+is eligible, preventing duplicate retries. Completed private grades require the
+existing explicit grader-update workflow for corrections.
+
+Grade CSVs now include `grade_state` and `provisional_points`. The `points` column
+is populated only for closed, completed grades with required private grading done,
+or an explicit final override. Open assignments, pending private grading and failed
+runs cannot silently export provisional scores as final grades.
