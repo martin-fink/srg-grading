@@ -39,7 +39,7 @@ organization must confirm App installation coverage for newly created repositori
 
 The adapter disables Actions, copies the exact approved Git tree through the Git
 Data API, verifies all file bytes and modes, sets read-only workflow-token defaults,
-and enables Actions. It copies a single template tree, not template history or
+and leaves Actions disabled. It copies a single template tree, not template history or
 other branches. Only then does it invite the immutable student account, resolving
 its current username immediately before the API call. Invitation status is polled
 by a delayed task. Repository lifecycle mutations use per-repository advisory locks.
@@ -52,15 +52,19 @@ author and committer dates are never used. Explicit registration reads the branc
 SHA from GitHub and records the server time **after** that read completes. Requests
 still waiting for the GitHub read at the cutoff have not been accepted.
 
-Every accepted receipt is retained. At most 32 source-fetch tasks per enrollment
-are active; additional receipts remain durable and are scheduled as capacity frees.
+Every accepted receipt is retained. Consecutive receipts of the same SHA reuse one
+submission. Only the latest pending source fetch per repository is kept, with at
+most eight active fetch tasks per enrollment; obsolete pending fetches are cancelled.
+Final source capture is prioritized and retained separately from feedback budgets.
 This queue delay does not change eligibility. Source snapshots are fetched by exact
 SHA and stored with SHA-256 digests. A force push before initial snapshot capture
 can make the object unavailable; such failures require review and must not be
 reported as successful retention. Once captured, source is independent of GitHub.
 
-Each snapshot is limited to 64 MiB of decoded blobs, 8 MiB per file, and 10,000
-files. Tree truncation, path traversal, file/directory collisions, and unsupported
+Student snapshots are limited to 8 MiB total and 512 files; trusted template/grader
+imports retain the platform limits of 64 MiB total, 8 MiB per file, and 10,000 files.
+Student-source API requests are separately budgeted per enrollment and globally.
+Tree truncation, path traversal, file/directory collisions, and unsupported
 Git modes are rejected. Symlink/submodule substitutions become integrity findings
 before extraction. Paths and exact Git blob bytes are used, without checkout or
 line-ending conversion. These limits target small assignment repositories; large

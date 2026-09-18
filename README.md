@@ -69,7 +69,7 @@ the `.#` build commands.
 | `cli` | Imports, admin changes, queue processing, synchronization, exports |
 
 The three binaries are `grading-web`, `gradingctl`, and `grading-executor`.
-See [operations](docs/operations.md), [grading protocol](docs/grading.md), and
+See [operations](docs/operations.md), [hardening rollout](docs/hardening.md), [grading protocol](docs/grading.md), and
 [pilot acceptance](docs/acceptance.md) before connecting external systems.
 
 ## Administration
@@ -168,7 +168,8 @@ uses `[[students]]` entries.
 The platform generates integrity manifests from pinned templates. All files outside
 explicitly editable directory prefixes are protected. `.github/` and `tests/` cannot
 be editable. Reference solutions and private tests belong in the private grader
-repository. Pin external Actions and dependencies in student templates.
+repository. Student repository Actions remain disabled; public feedback comes from
+the portal. Pin dependencies in the approved runner image.
 
 ## Design references
 

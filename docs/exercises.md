@@ -321,7 +321,7 @@ Build the example runtime with `nix build .#runner-image`; publishing it to your
 registry is a separate deployment step. No course sources are included. Its contents
 provide the runtimes for the C/Python example.
 
-Apply migrations through 0006 and updated grants using the owner role. Upgrade
+Apply migrations through 0007 and updated grants using the owner role. Upgrade
 web/tasks/executor together before registering schema 3. Migration 0004 adds a
 foreign-key reference from immutable revisions to their retained grader artifacts;
 back up those artifacts with accepted student snapshots and reports. Migration 0005
@@ -351,3 +351,6 @@ Migration 0006 removes the unused fixed-test results table. Earlier grader schem
 and local-profile configurations are unsupported; register exercises with schema 3
 and update executor configuration before resuming grading. Historical fixed-test
 report artifacts remain retained, but their revisions cannot be executed.
+
+See [the hardening rollout](hardening.md) for migration 0007, changed grading/export
+behavior, and the deployment acceptance cases required for these protections.

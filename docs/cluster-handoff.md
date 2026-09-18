@@ -41,7 +41,7 @@ snapshot there. Mickey fetches accepted student and grader snapshots over the
 lease-authenticated internal API; it receives no GitHub token. The source gateway
 preserves the existing App credential boundary rather than minting tokens for Jobs.
 
-Apply migrations through 0006 and updated grants; upgrade web/tasks/executor together.
+Apply migrations through 0007 and updated grants; upgrade web/tasks/executor together.
 Include grader artifacts in the existing application-volume backups. Existing student
 Git trees stay pinned; `--existing` changes only subsequent grading runs.
 
@@ -69,3 +69,6 @@ Migration 0006 removes the unused fixed-test results table. Earlier grader schem
 and local-profile configurations are unsupported; register exercises with schema 3
 and update executor configuration before resuming grading. Historical fixed-test
 report artifacts remain retained, but their revisions cannot be executed.
+
+See [the hardening rollout](hardening.md) for migration 0007, changed grading/export
+behavior, and the deployment acceptance cases required for these protections.
