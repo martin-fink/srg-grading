@@ -146,6 +146,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
     let revision = Revision {
         tests: Default::default(),
         grader: Some(Grader {
+            caching: None,
             repository: "org/grader".into(),
             revision: "c".repeat(40),
             image: assignment.image.clone(),

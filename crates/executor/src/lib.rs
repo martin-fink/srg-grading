@@ -1,4 +1,5 @@
 //! Approved shared runners and Kubernetes sandbox job construction.
+pub mod caching;
 use anyhow::{Result, ensure};
 use grading_core::{
     config::{Resources, identifier},
@@ -60,6 +61,18 @@ impl Config {
             self.runtime_class == "gvisor",
             "prototype requires a gvisor RuntimeClass"
         );
+        if let Some(seed) = lease
+            .revision
+            .grader
+            .as_ref()
+            .and_then(|g| g.caching.as_ref())
+        {
+            seed.validate()?;
+            ensure!(
+                seed.namespace == self.namespace && seed.source_pvc == self.source_pvc,
+                "cache is on a different staging volume"
+            );
+        }
         let assignment = &lease.revision.assignment;
         let registry = self
             .registry
@@ -231,8 +244,8 @@ impl ExecutionRequest {
     pub fn validate(&self) -> Result<()> {
         grading_core::protocol::validate_command(&self.command)?;
         ensure!(
-            (1..=3600).contains(&self.timeout_seconds),
-            "execution timeout must be 1..3600 seconds"
+            (1..=86400).contains(&self.timeout_seconds),
+            "execution timeout must be 1..86400 seconds"
         );
         ensure!(self.stdin.len() <= 65536, "execution input exceeds 64 KiB");
         Ok(())
@@ -269,5 +282,47 @@ pub fn execution_job(
     container["env"] = json!([{"name":"GRADING_EXECUTION_TIMEOUT", "value":request.timeout_seconds.min(remaining.saturating_sub(5).max(1)).to_string()}, {"name":"GRADING_SANDBOX_LIMITS", "value":"1"}]);
     container["volumeMounts"][1]["subPath"] =
         json!(format!("runs/{}/requests/{id}", lease.lease_token.simple()));
+    if let Some(seed) = lease
+        .revision
+        .grader
+        .as_ref()
+        .and_then(|g| g.caching.as_ref())
+    {
+        let pod = &mut value["spec"]["template"]["spec"];
+        pod["nodeSelector"] = json!({"kubernetes.io/arch": seed.config.architecture});
+        let mut copies = String::new();
+        for (i, artifact) in seed.config.artifacts.iter().enumerate() {
+            let path = format!("caches/{}/{}", seed.digest, artifact.name);
+            let private = artifact.mode == grading_core::caching::Mode::PrivateCopy;
+            let mount = if private {
+                format!("/cache-seeds/{}", artifact.name)
+            } else {
+                artifact.mount_path.clone()
+            };
+            pod["containers"][0]["volumeMounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":"source", "mountPath":mount, "subPath":path, "readOnly":true}));
+            if private {
+                let name = format!("cache-{i}");
+                pod["volumes"].as_array_mut().unwrap().push(json!({"name":name,"emptyDir":{"sizeLimit":format!("{}Gi",artifact.max_size_gib)}}));
+                pod["containers"][0]["volumeMounts"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"name":name,"mountPath":artifact.mount_path}));
+                let copier = include_str!("../../../scripts/copy-cache.py").replace('\'', "'\\''");
+                copies.push_str(&format!(
+                    "/bin/python3 -c '{copier}' {mount} {} && ",
+                    artifact.mount_path
+                ));
+            }
+        }
+        // All interpolated paths were restricted to safe ASCII components by Seed::validate.
+        let script = pod["containers"][0]["command"][5]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        pod["containers"][0]["command"][5] = json!(format!("{copies}{script}"));
+    }
     Ok(serde_json::from_value(value)?)
 }

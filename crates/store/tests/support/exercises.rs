@@ -61,6 +61,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         },
         assignment,
         grader: Some(Grader {
+            caching: None,
             source_digest: Some(first_source),
             workflow: Some(grading_core::protocol::Workflow {
                 public_command: vec!["/bin/python3".into(), "/grader/public.py".into()],

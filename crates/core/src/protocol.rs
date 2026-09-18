@@ -54,6 +54,19 @@ impl Revision {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("missing shared-runner grader"))?;
         grader.validate()?;
+        if let Some(seed) = &grader.caching {
+            let copies: u32 = seed
+                .config
+                .artifacts
+                .iter()
+                .filter(|a| a.mode == crate::caching::Mode::PrivateCopy)
+                .map(|a| a.max_size_gib)
+                .sum();
+            ensure!(
+                copies < self.assignment.resources.storage_gib,
+                "private cache copies need additional grading storage"
+            );
+        }
         ensure!(
             grader.image == self.assignment.image,
             "shared runner images must match"
@@ -221,6 +234,8 @@ impl RunResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grader {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caching: Option<crate::caching::Seed>,
     pub repository: String,
     pub revision: String,
     pub image: String,
@@ -231,6 +246,9 @@ pub struct Grader {
 }
 impl Grader {
     pub fn validate(&self) -> Result<()> {
+        if let Some(seed) = &self.caching {
+            seed.validate()?;
+        }
         ensure!(
             crate::config::github_repository(&self.repository),
             "invalid grader repository"

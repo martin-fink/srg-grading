@@ -1,4 +1,5 @@
 //! Configuration, integrity, and grading protocol.
+pub mod caching;
 pub mod config;
 pub mod diagnostics;
 pub mod integrity;

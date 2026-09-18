@@ -37,6 +37,7 @@ fn script_controller_and_student_commands_have_separate_mounts() {
             )]),
         },
         grader: Some(Grader {
+            caching: None,
             source_digest: Some("d".repeat(64)),
             repository: "org/private".into(),
             revision: "a".repeat(40),
@@ -155,6 +156,116 @@ fn script_controller_and_student_commands_have_separate_mounts() {
     );
     assert_eq!(pod["containers"][0]["env"][1]["value"], "1");
     assert!(pod["containers"][0].get("envFrom").is_none());
+    let cache = grading_core::caching::Caching {
+        version: 1,
+        recipe_dir: "cache".into(),
+        command: vec!["/bin/sh".into(), "/recipe/prepare.sh".into()],
+        timeout_seconds: 60,
+        resources: config.registry.as_ref().unwrap().resources.clone(),
+        architecture: "arm64".into(),
+        artifacts: vec![grading_core::caching::Artifact {
+            name: "compiler".into(),
+            path: "ccache".into(),
+            mount_path: "/cache/compiler".into(),
+            mode: grading_core::caching::Mode::ReadOnly,
+            max_size_gib: 1,
+        }],
+    };
+    let prep = serde_json::to_value(
+        grading_executor::caching::preparation_job(
+            &config,
+            &lease.revision,
+            &cache,
+            Uuid::new_v4(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let prep_pod = &prep["spec"]["template"]["spec"];
+    assert_eq!(prep_pod["automountServiceAccountToken"], false);
+    assert_eq!(prep_pod["runtimeClassName"], "gvisor");
+    assert_eq!(prep_pod["securityContext"]["runAsUser"], 10004);
+    assert_eq!(prep_pod["nodeSelector"]["kubernetes.io/arch"], "arm64");
+    assert!(!prep.to_string().contains("/grader"));
+    let mounts = prep_pod["containers"][0]["volumeMounts"]
+        .as_array()
+        .unwrap();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/recipe" && m["readOnly"] == true)
+    );
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/source" && m["readOnly"] == true)
+    );
+    lease.revision.grader.as_mut().unwrap().caching = Some(grading_core::caching::Seed {
+        config: cache,
+        input_key: "e".repeat(64),
+        digest: "f".repeat(64),
+        namespace: config.namespace.clone(),
+        source_pvc: config.source_pvc.clone(),
+    });
+    lease.revision_digest = lease.revision.digest().unwrap();
+    let cached =
+        serde_json::to_value(execution_job(&config, &lease, &request, 60).unwrap()).unwrap();
+    let mounts = cached["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        .as_array()
+        .unwrap();
+    assert!(
+        mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/cache/compiler" && m["readOnly"] == true)
+    );
+    assert!(
+        !serde_json::to_string(&controller_job(&config, &lease, 60).unwrap())
+            .unwrap()
+            .contains("/cache/compiler")
+    );
+    lease
+        .revision
+        .grader
+        .as_mut()
+        .unwrap()
+        .caching
+        .as_mut()
+        .unwrap()
+        .config
+        .artifacts[0]
+        .mode = grading_core::caching::Mode::PrivateCopy;
+    lease.revision_digest = lease.revision.digest().unwrap();
+    assert!(execution_job(&config, &lease, &request, 60).is_err()); // No budget left for compilation.
+    lease.revision.assignment.resources.storage_gib = 2;
+    config.registry.as_mut().unwrap().resources.storage_gib = 2;
+    lease.revision_digest = lease.revision.digest().unwrap();
+    let private_copy =
+        serde_json::to_value(execution_job(&config, &lease, &request, 60).unwrap()).unwrap();
+    let pod = &private_copy["spec"]["template"]["spec"];
+    assert!(
+        pod["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "cache-0" && v["emptyDir"]["sizeLimit"] == "1Gi")
+    );
+    assert!(
+        pod["containers"][0]["command"][5]
+            .as_str()
+            .unwrap()
+            .contains("/cache-seeds/compiler /cache/compiler && ")
+    );
+    lease
+        .revision
+        .grader
+        .as_mut()
+        .unwrap()
+        .caching
+        .as_mut()
+        .unwrap()
+        .source_pvc = "other".into();
+    lease.revision_digest = lease.revision.digest().unwrap();
+    assert!(execution_job(&config, &lease, &request, 60).is_err());
     config.registry.as_mut().unwrap().runner_images.clear();
     assert!(controller_job(&config, &lease, 60).is_err());
     let mut invalid = request;

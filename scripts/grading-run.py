@@ -20,8 +20,8 @@ def main():
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
-    if not 1 <= args.timeout_seconds <= 3600:
-        parser.error("timeout must be 1..3600 seconds")
+    if not 1 <= args.timeout_seconds <= 86400:
+        parser.error("timeout must be 1..86400 seconds")
     data = args.stdin.read_text() if args.stdin else ""
     if len(data.encode()) > 65536:
         parser.error("stdin exceeds 64 KiB")

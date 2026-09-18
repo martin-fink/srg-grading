@@ -289,6 +289,17 @@ async fn execute_inner(
         log_failure("lease_approval", &error);
         return Ok(result);
     }
+    if let Some(seed) = lease
+        .revision
+        .grader
+        .as_ref()
+        .and_then(|g| g.caching.as_ref())
+    {
+        let config = config.clone();
+        let seed = seed.clone();
+        tokio::task::spawn_blocking(move || grading_executor::caching::verify(&config, &seed))
+            .await??;
+    }
     let response = http
         .get(format!("{base}/source"))
         .query(&[("lease_token", lease.lease_token.to_string())])

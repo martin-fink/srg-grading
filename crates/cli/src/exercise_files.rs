@@ -17,6 +17,8 @@ use std::{
 
 #[derive(Args)]
 pub struct Apply {
+    #[arg(long, env = "GRADING_CACHE_CONFIG")]
+    cache_config: Option<PathBuf>,
     #[arg(required = true, num_args = 1..)]
     files: Vec<PathBuf>,
     #[arg(long)]
@@ -128,6 +130,7 @@ pub async fn apply(pool: &PgPool, args: &super::Args, options: &Apply) -> Result
         for (name, entry) in entries {
             let previous = before[course].iter().find(|e| e.slug == *name);
             let register = super::exercises::Register {
+                cache_config: options.cache_config.clone(),
                 course: course.clone(),
                 name: name.clone(),
                 template: Some(entry.template.clone()),
@@ -141,7 +144,7 @@ pub async fn apply(pool: &PgPool, args: &super::Args, options: &Apply) -> Result
                 dry_run: true,
                 runner_image: entry.runner_image.clone(),
             };
-            let item = super::exercises::prepare(
+            let mut item = super::exercises::prepare(
                 pool,
                 github.as_ref().context("missing GitHub adapter")?,
                 &register,
@@ -152,6 +155,8 @@ pub async fn apply(pool: &PgPool, args: &super::Args, options: &Apply) -> Result
                 item.source.is_some(),
                 "file imports require grader exercise.toml schema 3 (shared runner)"
             );
+            item.prepare_cache(options.cache_config.as_deref(), true)
+                .await?;
             let revision = item.revision.digest()?;
             let action = match previous {
                 None => "ADD",
@@ -195,6 +200,10 @@ pub async fn apply(pool: &PgPool, args: &super::Args, options: &Apply) -> Result
     }
     if !removals.is_empty() {
         confirm_removals()?;
+    }
+    for (item, _) in &mut prepared {
+        item.prepare_cache(options.cache_config.as_deref(), false)
+            .await?;
     }
     let reason = format!("{}; manifest_sha256={}", options.reason, hashes.join(","));
     let operator = super::operator();

@@ -32,3 +32,7 @@ libc.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tower.workspace = true

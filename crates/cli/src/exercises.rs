@@ -12,7 +12,7 @@ use grading_github::GitHub;
 use grading_store::exercises::{self, Publication};
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum ExerciseCommand {
@@ -42,6 +42,9 @@ pub enum ExerciseCommand {
 
 #[derive(Args)]
 pub struct Register {
+    /// Executor configuration and shared staging PVC, required to build cache seeds.
+    #[arg(long, env = "GRADING_CACHE_CONFIG")]
+    pub cache_config: Option<PathBuf>,
     #[arg(long)]
     pub course: String,
     #[arg(long)]
@@ -74,6 +77,7 @@ pub struct Register {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Definition {
+    caching: Option<grading_core::caching::Caching>,
     schema_version: u32,
     title: String,
     branch: String,
@@ -92,6 +96,19 @@ impl Definition {
             self.schema_version == 3,
             "only exercise schema 3 is supported"
         );
+        if let Some(caching) = &self.caching {
+            caching.validate()?;
+            let copies: u32 = caching
+                .artifacts
+                .iter()
+                .filter(|a| a.mode == grading_core::caching::Mode::PrivateCopy)
+                .map(|a| a.max_size_gib)
+                .sum();
+            ensure!(
+                copies < self.resources.storage_gib,
+                "private cache copies need additional grading storage"
+            );
+        }
         self.workflow
             .as_ref()
             .context("schema 3 requires a workflow")?
@@ -131,9 +148,76 @@ fn text_file(snapshot: &Snapshot, path: &str) -> Result<String> {
 }
 
 pub struct Prepared {
+    pub cache: Option<CacheInput>,
     pub revision: Revision,
     pub expected: Option<String>,
     pub source: Option<Vec<u8>>,
+}
+
+pub struct CacheInput {
+    config: grading_core::caching::Caching,
+    source: Snapshot,
+    recipe: Snapshot,
+}
+impl Prepared {
+    pub async fn prepare_cache(&mut self, path: Option<&Path>, dry_run: bool) -> Result<()> {
+        let Some(input) = &self.cache else {
+            return Ok(());
+        };
+        let key = input.config.key(
+            &self.revision.assignment.image,
+            &input.source,
+            &input.recipe,
+        )?;
+        if dry_run && path.is_none() {
+            println!(
+                "Cache {key}: preparation/reuse requires --cache-config (not checked in this dry run)"
+            );
+            return Ok(());
+        }
+        let path = path.context("exercise caching requires --cache-config or GRADING_CACHE_CONFIG, with access to the executor staging PVC and Kubernetes")?;
+        let config: grading_executor::Config =
+            toml::from_str(&tokio::fs::read_to_string(path).await?)?;
+        grading_executor::caching::preparation_job(
+            &config,
+            &self.revision,
+            &input.config,
+            uuid::Uuid::new_v4(),
+        )?;
+        if dry_run {
+            let reference = config.staging_root.join("cache-refs").join(&key);
+            if reference.exists() {
+                let seed: grading_core::caching::Seed =
+                    serde_json::from_slice(&tokio::fs::read(reference).await?)?;
+                ensure!(seed.input_key == key, "cache reference mismatch");
+                grading_executor::caching::verify(&config, &seed)?;
+                println!("Cache {key}: reuse {}", seed.digest);
+                self.revision
+                    .grader
+                    .as_mut()
+                    .context("missing grader")?
+                    .caching = Some(seed);
+            } else {
+                println!("Cache {key}: preparation required");
+            }
+        } else {
+            let seed = grading_executor::caching::prepare(
+                &config,
+                &self.revision,
+                &input.config,
+                &input.source,
+                &input.recipe,
+            )
+            .await?;
+            self.revision
+                .grader
+                .as_mut()
+                .context("missing grader")?
+                .caching = Some(seed);
+        }
+        self.revision.validate()?;
+        Ok(())
+    }
 }
 
 pub async fn register(
@@ -144,7 +228,10 @@ pub async fn register(
     operator: &str,
     artifact_dir: &Path,
 ) -> Result<()> {
-    let prepared = prepare(pool, github, args, update).await?;
+    let mut prepared = prepare(pool, github, args, update).await?;
+    prepared
+        .prepare_cache(args.cache_config.as_deref(), args.dry_run)
+        .await?;
     if args.dry_run {
         println!("Validated exercise; no artifacts or database records changed");
         return Ok(());
@@ -255,6 +342,17 @@ pub async fn prepare(
             "private test path is missing"
         );
     }
+    let cache = definition
+        .caching
+        .as_ref()
+        .map(|config| {
+            Ok::<_, anyhow::Error>(CacheInput {
+                config: config.clone(),
+                source: template_source.clone(),
+                recipe: config.recipe(&grader_source)?,
+            })
+        })
+        .transpose()?;
     let manifest = Manifest::generate(&template_source, definition.editable)?;
     let opens_at = args
         .opens_at
@@ -295,6 +393,7 @@ pub async fn prepare(
             },
         },
         grader: Some(Grader {
+            caching: None,
             source_digest: Some(grading_core::security::digest(&grader_bytes)),
             workflow: definition.workflow,
             repository: grader,
@@ -309,6 +408,7 @@ pub async fn prepare(
     );
     let expected = previous.as_ref().map(Revision::digest).transpose()?;
     Ok(Prepared {
+        cache,
         revision,
         expected,
         source: Some(grader_bytes),
@@ -319,6 +419,39 @@ pub async fn prepare(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn optional_cache_keeps_schema_three_and_validates_the_recipe() {
+        let example = include_str!("../../../examples/shared-grader/exercise.toml");
+        let cache = r#"
+[caching]
+version=1
+recipe_dir="cache"
+command=["/bin/bash","/recipe/prepare.sh"]
+timeout_seconds=14400
+[caching.resources]
+cpu=8
+memory_gib=32
+storage_gib=100
+[[caching.artifacts]]
+name="compiler-cache"
+path="ccache"
+mount_path="/cache/compiler"
+mode="read_only"
+max_size_gib=30
+"#;
+        let definition: Definition = toml::from_str(&format!("{example}\n{cache}")).unwrap();
+        definition.validate().unwrap();
+        assert_eq!(definition.schema_version, 3);
+        assert_eq!(definition.caching.unwrap().architecture, "amd64");
+        let invalid = format!("{example}\n{cache}").replace("/cache/compiler", "/grader");
+        assert!(
+            toml::from_str::<Definition>(&invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
 
     #[test]
     fn github_sources_and_explicit_rollouts() {
