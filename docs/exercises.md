@@ -354,3 +354,132 @@ report artifacts remain retained, but their revisions cannot be executed.
 
 See [the hardening rollout](hardening.md) for migration 0007, changed grading/export
 behavior, and the deployment acceptance cases required for these protections.
+
+## Optional prepared caches (schema 3)
+
+A grader's `exercise.toml` may contain a generic cache recipe. The platform does
+not assume ccache, a language, or a build system:
+
+```toml
+[caching]
+version = 1
+recipe_dir = "cache"
+command = ["/bin/bash", "/recipe/prepare.sh"]
+timeout_seconds = 14400
+architecture = "amd64" # default; arm64 is also supported
+
+[caching.resources]
+cpu = 8
+memory_gib = 32
+storage_gib = 100
+
+[[caching.artifacts]]
+name = "compiler-cache"
+path = "ccache" # directory beneath /output
+mount_path = "/cache/compiler"
+mode = "read_only" # or private_copy
+max_size_gib = 30
+```
+
+Preparation sees `/source` (pinned template, read-only), `/recipe` (only the selected
+subdirectory of the pinned grader, read-only), `/workspace` (scratch), and `/output`
+(exports). It uses the exercise's approved runner image in gVisor, with its own
+CPU, memory, storage and timeout limits. Dependencies must already be in the runner
+image or pinned inputs; retain the sandbox namespace's deny-all network policy.
+Private tests and publication credentials are not mounted into preparation Pods.
+The recipe must create every declared export directory. Exports may contain regular
+files and directories, with at most 100,000 entries and 32 directory levels in total;
+symlinks, hard links, devices, sockets and FIFOs are rejected.
+
+Run the registration CLI as UID 10004, with the executor's staging PVC mounted at
+`staging_root`, the application artifact volume, operator DB/GitHub credentials,
+and Kubernetes permissions to manage Jobs and list Pods/read logs in the sandbox
+namespace. Preparation Pods also use UID 10004 so the operator can seal their files.
+The CLI's credentials are never passed to those Pods. Supply the executor configuration:
+
+```sh
+export GRADING_CACHE_CONFIG=/etc/grading/executor.toml
+gradingctl exercise apply exercises.toml --reason 'Prepare build caches' --dry-run
+gradingctl exercise apply exercises.toml --reason 'Prepare build caches'
+```
+
+`--cache-config` is also available on `exercise add`, `update`, and `apply`.
+The dry run validates recipes and worker caps, checks existing seeds, and reports
+reuse or preparation required without creating files or Jobs. Without a cache config,
+a dry run can validate the recipe and report its key but cannot check local reuse.
+
+Creation is **synchronous**: a new exercise is published only after its caches are
+ready. Updates keep the previous active revision while building. A bulk apply prepares
+all caches before committing the catalog transaction; failure leaves the catalog
+unchanged. This deliberately avoids a second asynchronous activation state machine.
+A concurrent catalog edit still makes publication fail its existing comparison check;
+retrying reuses the completed cache. Existing submissions and queued runs keep their
+pinned revisions; `--existing` retains its normal explicit rollout behavior.
+
+The CLI prints the input key, Job name, diagnostic directory and final artifact
+digest. `exercise show` includes the published seed's configuration and both digests.
+While preparation runs, inspect that Job with normal operator Kubernetes tools.
+Up to 256 KiB of preparation logs are saved privately in
+`cache-builds/<attempt>/preparation.log`; they are not grading feedback.
+Retry a failed or interrupted preparation by repeating the same registration command.
+A per-key OS file lock prevents concurrent builders, and retry stops a previous
+attempt's remaining Job before starting again. Do not manually delete a live lock file.
+Increment `caching.version` to request a new seed intentionally.
+
+Input keys include the pinned template snapshot, recipe subtree contents, runner
+image digest, architecture, recipe/configuration and a preparation protocol version.
+Unrelated private-test edits do not invalidate a seed. Completed exports are hashed
+by content and executable bit after Kubernetes confirms the preparation Pods have
+stopped. File timestamps are excluded. An atomic reference publishes the completed
+seed; identical input keys reuse it across exercises on the same staging volume.
+
+Student commands get either a read-only seed or a fresh writable copy in a bounded
+`emptyDir` for **each execution request**. Private copies consume grading storage;
+the assignment must budget more than the sum of their declared maximum sizes.
+They are never promoted or reused by another request or student. The private grading
+controller does not receive cache mounts. Mount paths are restricted to `/cache/<name>`
+so a recipe cannot mask source files, tools, or grading control paths.
+
+Cache verification hashes contents before each grading run, so corruption produces
+an infrastructure failure rather than silently changing a grade. This costs disk I/O,
+but neither transfers multi-GiB artifacts through the submission API nor recompiles
+cached objects. Keep preparation and grading on the same namespace/PVC; Pods select
+the configured CPU architecture. Missing caches fail closed.
+
+This generic mechanism cannot make a timestamp-based build directory correct by
+itself. Recipes must export content-keyed compiler caches or immutable dependencies;
+always run the build against the current submission in a fresh workspace. Do not
+reuse a `make`/Ninja build tree solely because its timestamps look newer. For any
+compiler-cache integration, test that changing source bytes recompiles, touching a
+file preserves correctness, and an uncached build produces the same result. Configure
+the tool's cache location/miss behavior explicitly in the instructor's command.
+Use explicit portable compiler target flags: host-specific options such as
+`-march=native` can create artifacts unsuitable for another node of the same architecture.
+Student command requests support up to 86,400 seconds, bounded by the assignment's
+remaining run time and the worker's configured caps.
+
+### Storage and deployment requirements
+
+`caches/<artifact-digest>` and `cache-refs/<input-key>` live on the trusted executor
+staging volume, separate from the HTTP source/report artifact store. Back up these
+directories alongside the database, or reconstruct the exact referenced seeds before
+resuming grading. Seeds are retained for historical revisions; no automatic eviction
+or garbage collection is implemented. Failed/interrupted attempts remain quarantined
+under `cache-builds`; remove them only after confirming their Pods are gone. Never
+remove a cache still referenced by a revision or queued/historical run.
+
+Preparation monitors temporary output bytes and entry counts and validates each export
+before publication. Kubernetes ephemeral-storage limits cover scratch and private
+copies, **not PVC writes**. Provision filesystem/project quotas and sufficient reserved
+capacity for cache output and retained seeds: periodic monitoring alone cannot prevent
+a burst write from filling the shared PVC. The storage must support cross-process
+file locking and atomic rename. Set operator/executor resource caps high enough for
+the declared preparation budget. Validate PVC permissions, quotas, network isolation,
+architecture scheduling and termination on the live cluster before enabling this.
+
+Submission limits are unchanged. Large prepared artifacts do not make a full LLVM
+source checkout fit the existing submission snapshot limits. Pinned large-source plus
+student-delta transport remains separate work; large baseline dependencies can already
+be supplied through the approved runner image. Student process/descriptor/output limits
+also remain enforced; heavy build commands should bound parallelism and redirect their
+verbose build output within their disposable workspace.
