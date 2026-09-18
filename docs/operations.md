@@ -200,3 +200,10 @@ final grading and explicit instructor regrades remain available. Historical sour
 is not blocked by the public-feedback budget. Existing evidence is never deleted by
 this policy. Exceeding the budget requires instructor review; it does not change
 receipt eligibility or silently award a grade.
+
+The executor reconciles staged runs on startup, every minute between runs, and after
+each run. Completed runs are removed only after Kubernetes reports no matching Pods.
+Unmarked crash leftovers are retained for the configured maximum grading duration
+plus ten minutes before removal. A Kubernetes listing failure retains all files.
+Use a staging root dedicated to this executor configuration; all its Jobs must use
+the configured namespace. Monitor staging free space and reconciliation warnings.

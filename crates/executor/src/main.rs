@@ -1,4 +1,5 @@
 //! Restricted Kubernetes grading worker.
+mod cleanup;
 mod logs;
 mod workflow;
 use anyhow::{Context, Result, ensure};
@@ -119,7 +120,14 @@ async fn run(args: Args) -> Result<()> {
         .await
         .context(Stage("staging_root_create"))?;
     tracing::info!("executor polling started");
+    let mut last_cleanup = None;
     loop {
+        if last_cleanup.is_none_or(|time: Instant| time.elapsed() >= Duration::from_secs(60)) {
+            if let Err(error) = cleanup::reconcile(&config, &pods).await {
+                log_failure("staging_reconcile", &error);
+            }
+            last_cleanup = Some(Instant::now());
+        }
         let response = http
             .post(format!(
                 "{}/internal/lease",
@@ -202,19 +210,17 @@ async fn run(args: Args) -> Result<()> {
                     log_failure("grading_execute", &error);
                 }
             }
-            let remaining = pods.list(&selector).await;
-            if remaining.is_err() {
-                tracing::warn!(task_id=%lease.task_id, stage="kubernetes_cleanup_status", "could not verify sandbox cleanup; retaining staged files");
-            }
-            if remaining.is_ok_and(|remaining| remaining.items.is_empty()) {
-                let directory = config
-                    .staging_root
-                    .join("runs")
-                    .join(lease.lease_token.simple().to_string());
-                if directory.exists() {
-                    tokio::fs::remove_dir_all(directory)
-                        .await
-                        .context(Stage("staging_cleanup"))?;
+            let directory = config
+                .staging_root
+                .join("runs")
+                .join(lease.lease_token.simple().to_string());
+            if directory.exists() {
+                if let Err(error) = tokio::fs::write(directory.join(".finished"), b"").await {
+                    log_failure("staging_mark_finished", &error.into());
+                }
+                // Deletion is asynchronous; reconciliation keeps retrying after this turn.
+                if let Err(error) = cleanup::reconcile(&config, &pods).await {
+                    log_failure("staging_reconcile", &error);
                 }
             }
         } else if !args.once {
