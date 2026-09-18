@@ -123,7 +123,7 @@ async fn publish_in_transaction(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct CatalogEntry {
     pub slug: String,
     pub current_revision: Option<String>,

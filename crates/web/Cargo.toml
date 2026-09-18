@@ -22,7 +22,7 @@ grading-core.workspace = true
 grading-store.workspace = true
 grading-github.workspace = true
 askama.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 base64.workspace = true
 clap.workspace = true
 reqwest.workspace = true

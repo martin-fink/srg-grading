@@ -175,6 +175,7 @@ async fn browser_and_worker_boundaries() -> Result<()> {
         )
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
+    portal_forms(&pool, &app, &cookie, &session.csrf).await?;
     identity::admin_change(
         &admin,
         200,
@@ -453,5 +454,205 @@ async fn shared_runner_boundaries(
         )
         .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+fn multipart_request(
+    action: &str,
+    cookie: &str,
+    csrf: &str,
+    pasted: &str,
+    upload: Option<&[u8]>,
+) -> Request<Body> {
+    let mut body = Vec::new();
+    for (name, value) in [
+        ("csrf", csrf),
+        ("reason", "HTTP portal test"),
+        ("content", pasted),
+    ] {
+        body.extend_from_slice(format!("--test-boundary\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").as_bytes());
+    }
+    if let Some(bytes) = upload {
+        body.extend_from_slice(b"--test-boundary\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"input.toml\"\r\nContent-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--test-boundary--\r\n");
+    Request::builder()
+        .method("POST")
+        .uri(format!("/admin/actions/{action}"))
+        .header("cookie", cookie)
+        .header("origin", "https://grading.example")
+        .header(
+            "content-type",
+            "multipart/form-data; boundary=test-boundary",
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+async fn portal_forms(pool: &PgPool, app: &axum::Router, cookie: &str, csrf: &str) -> Result<()> {
+    let page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/actions/course")
+                .header("cookie", cookie)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(page.status(), StatusCode::OK);
+    let text = String::from_utf8(to_bytes(page.into_body(), 200_000).await?.to_vec())?;
+    assert!(
+        text.contains("multipart/form-data")
+            && text.contains("textarea")
+            && text.contains("type=\"file\"")
+    );
+    assert!(text.contains("Validate and preview"));
+    assert!(!text.contains("Confirm and apply"));
+    let wrong = app
+        .clone()
+        .oneshot(multipart_request(
+            "course",
+            cookie,
+            "wrong",
+            "schema_version=1",
+            None,
+        ))
+        .await?;
+    assert_eq!(wrong.status(), StatusCode::FORBIDDEN);
+    let input = "schema_version=1\n[course]\nid='portal-http'\ntitle='<script>alert(1)</script>'\ngithub_organization='fixture-org'\ntimezone='UTC'\n";
+    let paste = app
+        .clone()
+        .oneshot(multipart_request("course", cookie, csrf, input, None))
+        .await?;
+    assert_eq!(paste.status(), StatusCode::SEE_OTHER);
+    let location = paste.headers()["location"].to_str()?.to_owned();
+    let id: Uuid = location.rsplit('/').next().unwrap().parse()?;
+    let op = grading_store::admin::get(pool, id, 200).await?;
+    assert_eq!(op.state, "pending_validation");
+    assert_eq!(op.input["content"], input);
+    assert!(!op.confirmable);
+    let edit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{location}/edit"))
+                .header("cookie", cookie)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let html = String::from_utf8(to_bytes(edit.into_body(), 200_000).await?.to_vec())?;
+    assert!(!html.contains("<script>"));
+    assert!(html.contains("&#60;script&#62;") || html.contains("&lt;script&gt;"));
+    let show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&location)
+                .header("cookie", cookie)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let html = String::from_utf8(to_bytes(show.into_body(), 200_000).await?.to_vec())?;
+    assert!(!html.contains("Confirm and apply"));
+    assert!(html.contains("refresh"));
+    let upload = app
+        .clone()
+        .oneshot(multipart_request(
+            "course",
+            cookie,
+            csrf,
+            "",
+            Some(input.as_bytes()),
+        ))
+        .await?;
+    assert_eq!(upload.status(), StatusCode::SEE_OTHER);
+    let duplicate = app
+        .clone()
+        .oneshot(multipart_request(
+            "course",
+            cookie,
+            csrf,
+            input,
+            Some(input.as_bytes()),
+        ))
+        .await?;
+    assert_eq!(duplicate.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let binary = app
+        .clone()
+        .oneshot(multipart_request(
+            "course",
+            cookie,
+            csrf,
+            "",
+            Some(&[0xff, 0xfe]),
+        ))
+        .await?;
+    assert_eq!(binary.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let content = format!("{}\n# {}", input, "x".repeat(70_000));
+    let larger = app
+        .clone()
+        .oneshot(multipart_request(
+            "course",
+            cookie,
+            csrf,
+            "",
+            Some(content.as_bytes()),
+        ))
+        .await?;
+    assert_eq!(larger.status(), StatusCode::SEE_OTHER);
+    let huge = vec![b'x'; grading_core::admin::MAX_INPUT + 1];
+    let large = app
+        .clone()
+        .oneshot(multipart_request("course", cookie, csrf, "", Some(&huge)))
+        .await?;
+    assert_eq!(large.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let token = "secret-worker-token-with-at-least-43-characters-for-testing";
+    let worker = app
+        .clone()
+        .oneshot(multipart_request(
+            "worker_register",
+            cookie,
+            csrf,
+            token,
+            None,
+        ))
+        .await?;
+    assert_eq!(worker.status(), StatusCode::SEE_OTHER);
+    let id: Uuid = worker.headers()["location"]
+        .to_str()?
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .parse()?;
+    let op = grading_store::admin::get(pool, id, 200).await?;
+    assert!(!op.input.to_string().contains(token));
+    assert_eq!(op.input["content"], grading_core::security::digest(token));
+    let exist: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM courses WHERE id='portal-http')")
+            .fetch_one(pool)
+            .await?;
+    assert!(!exist);
+    for view in [
+        "courses",
+        "students",
+        "repositories",
+        "submissions",
+        "events",
+        "runs",
+        "tasks",
+        "workers",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/admin/data/{view}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "{view}");
+    }
     Ok(())
 }

@@ -29,37 +29,37 @@ pub struct Apply {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct File {
-    schema_version: u32,
-    course: String,
-    runner_image: Option<String>,
+pub(super) struct File {
+    pub(super) schema_version: u32,
+    pub(super) course: String,
+    pub(super) runner_image: Option<String>,
     #[serde(default)]
-    exercises: BTreeMap<String, Entry>,
+    pub(super) exercises: BTreeMap<String, Entry>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Entry {
-    template: String,
+pub(super) struct Entry {
+    pub(super) template: String,
     #[serde(default = "main_ref")]
-    template_ref: String,
-    grader: String,
+    pub(super) template_ref: String,
+    pub(super) grader: String,
     #[serde(default = "main_ref")]
-    grader_ref: String,
-    runner_image: Option<String>,
+    pub(super) grader_ref: String,
+    pub(super) runner_image: Option<String>,
     #[serde(deserialize_with = "grading_core::config::datetime")]
-    opens_at: DateTime<Utc>,
+    pub(super) opens_at: DateTime<Utc>,
     #[serde(deserialize_with = "grading_core::config::datetime")]
-    deadline: DateTime<Utc>,
+    pub(super) deadline: DateTime<Utc>,
     #[serde(default)]
-    existing: bool,
+    pub(super) existing: bool,
 }
 
 fn main_ref() -> String {
     "main".into()
 }
 
-fn merge(files: Vec<File>) -> Result<BTreeMap<String, BTreeMap<String, Entry>>> {
+pub(super) fn merge(files: Vec<File>) -> Result<BTreeMap<String, BTreeMap<String, Entry>>> {
     let mut courses: BTreeMap<String, BTreeMap<String, Entry>> = BTreeMap::new();
     for file in files {
         ensure!(

@@ -24,3 +24,8 @@ GRANT USAGE ON SEQUENCE reconciliation_observations_id_seq TO grading_operator;
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE ON submission_admission TO grading_web;
+
+GRANT SELECT ON admin_operations, admin_worker_status TO grading_web;
+GRANT INSERT(id,actor,session_hash,input) ON admin_operations TO grading_web;
+GRANT SELECT, INSERT, UPDATE ON admin_operations, admin_worker_status TO grading_operator;
+GRANT EXECUTE ON FUNCTION confirm_admin_operation(uuid,bigint,text,text) TO grading_web;

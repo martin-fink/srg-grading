@@ -43,3 +43,11 @@ footer { color: var(--muted); border-top: 1px solid var(--line); padding: 24px 0
 @keyframes spin { to { transform: rotate(360deg); } }
 .execution-log { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--pale); padding: 20px; font: .875rem/1.5 monospace; }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+.admin-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; margin-bottom: 40px; }
+.admin-actions section { border: 1px solid var(--line); padding: 20px; }
+label { display: block; margin: 20px 0; }
+input:not([type=hidden]), textarea { display: block; width: 100%; max-width: 900px; padding: 10px; border: 1px solid #777; font: inherit; margin-top: 6px; }
+textarea.code-input { font: .95rem/1.5 monospace; tab-size: 4; white-space: pre; min-height: 220px; }
+.error { border-left-color: #a32020; }
+form + form { margin-top: 24px; }

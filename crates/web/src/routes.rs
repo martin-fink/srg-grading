@@ -67,7 +67,12 @@ impl IntoResponse for HttpError {
                 StatusCode::UNAUTHORIZED => "Please sign in.",
                 StatusCode::FORBIDDEN => "This request is not permitted.",
                 StatusCode::NOT_FOUND => "Not found.",
-                StatusCode::BAD_REQUEST => "Invalid request.",
+                StatusCode::BAD_REQUEST => {
+                    "Invalid request. Check the form fields and upload encoding."
+                }
+                StatusCode::PAYLOAD_TOO_LARGE => {
+                    "The input is too large. Upload or paste at most 1 MiB; split larger imports."
+                }
                 StatusCode::TOO_MANY_REQUESTS => "Too many requests. Please wait before retrying.",
                 StatusCode::CONFLICT => "This operation cannot be accepted in its current state.",
                 _ => "The operation failed. Please retry or contact your instructor.",
@@ -138,6 +143,24 @@ pub fn public_router(state: AppState) -> Router {
         .route("/auth/callback", get(callback))
         .route("/logout", post(logout))
         .route("/admin", get(admin))
+        .route(
+            "/admin/actions/{action}",
+            get(crate::admin::new)
+                .post(crate::admin::validate)
+                .layer(DefaultBodyLimit::max(2_200_000)),
+        )
+        .route("/admin/operations/{id}", get(crate::admin::show))
+        .route("/admin/operations/{id}/edit", get(crate::admin::edit))
+        .route(
+            "/admin/operations/{id}/confirm",
+            post(crate::admin::confirm),
+        )
+        .route("/admin/operations/{id}/retry", post(crate::admin::retry))
+        .route(
+            "/admin/operations/{id}/download",
+            get(crate::admin::download),
+        )
+        .route("/admin/data/{view}", get(crate::admin::data))
         .route("/assignments/{id}/repository", post(create_repository))
         .route("/repositories/{id}/submit", post(submit))
         .route("/runs/{id}/report", get(report))
@@ -238,13 +261,13 @@ fn set_cookie(response: &mut Response, name: &str, value: &str, age: u32) {
             .expect("generated cookie"),
     );
 }
-async fn authenticated(state: &AppState, headers: &HeaderMap) -> HttpResult<Session> {
+pub(crate) async fn authenticated(state: &AppState, headers: &HeaderMap) -> HttpResult<Session> {
     let raw = cookie(headers, SESSION_COOKIE).ok_or(HttpError(StatusCode::UNAUTHORIZED))?;
     identity::session(&state.pool, raw)
         .await?
         .ok_or(HttpError(StatusCode::UNAUTHORIZED))
 }
-fn csrf(
+pub(crate) fn csrf(
     state: &AppState,
     headers: &HeaderMap,
     session: &Session,
@@ -620,6 +643,8 @@ async fn admin(State(state): State<AppState>, headers: HeaderMap) -> HttpResult<
     let rows:Vec<(String,i64,i64,i64,i64)>=sqlx::query_as("SELECT c.title,(SELECT count(*) FROM enrollments e WHERE e.course_id=c.id),(SELECT count(*) FROM student_repositories r JOIN enrollments e ON e.id=r.enrollment_id WHERE e.course_id=c.id),(SELECT count(*) FROM student_repositories r JOIN enrollments e ON e.id=r.enrollment_id WHERE e.course_id=c.id AND r.needs_review),(SELECT count(*) FROM tasks t LEFT JOIN submissions s ON s.id::text=t.payload->>'submission_id' LEFT JOIN grading_runs g ON g.id::text=t.payload->>'run_id' LEFT JOIN submissions gs ON gs.id=g.submission_id JOIN student_repositories rr ON rr.id::text=t.payload->>'repository_id' OR rr.id=s.repository_id OR rr.id=gs.repository_id JOIN enrollments ee ON ee.id=rr.enrollment_id WHERE t.status='failed' AND ee.course_id=c.id) FROM courses c ORDER BY c.id").fetch_all(&state.pool).await?;
     Ok(Html(
         AdminPage {
+            actions: grading_core::admin::ACTIONS,
+            operations: sqlx::query_as("SELECT id,input->>'action',state FROM admin_operations WHERE actor=$1 ORDER BY created_at DESC LIMIT 30").bind(session.github_id).fetch_all(&state.pool).await?,
             login: session.login,
             rows: rows
                 .into_iter()

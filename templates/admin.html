@@ -37,7 +37,10 @@
             </tbody>
         </table>
     </div>
-    <p class="muted">Imports, extensions, grade overrides, exports, and administrator membership are managed through the local administration CLI.</p></main>
+    <h2>Manage courses and grading</h2>
+    <div class="admin-actions">{% for action in actions %}<section><h3>{{ action.title }}</h3><p>{{ action.description }}</p><a class="button" href="/admin/actions/{{ action.id }}">{{ action.title }}</a></section>{% endfor %}</div>
+    <h2>Find records and diagnose problems</h2><nav><a href="/admin/data/courses">Courses</a><a href="/admin/data/students">Students</a><a href="/admin/data/repositories">Repositories</a><a href="/admin/data/submissions">Submissions</a><a href="/admin/data/events">Submission events</a><a href="/admin/data/runs">Grading runs</a><a href="/admin/data/tasks">Tasks and errors</a><a href="/admin/data/workers">Workers</a></nav>
+    <h2>Your recent operations</h2><ul>{% for op in operations %}<li><a href="/admin/operations/{{ op.0 }}">{{ op.1 }} · {{ op.2 }} · {{ op.0 }}</a></li>{% endfor %}</ul></main>
 <footer>Technical University of Munich · Repository-first grading</footer>
 </body>
 </html>

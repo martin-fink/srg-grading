@@ -179,6 +179,8 @@ pub fn preview() -> Dashboard {
 #[derive(Template)]
 #[template(path = "admin.html")]
 pub struct AdminPage {
+    pub actions: &'static [grading_core::admin::Action],
+    pub operations: Vec<(uuid::Uuid, String, String)>,
     pub login: String,
     pub rows: Vec<AdminRow>,
 }

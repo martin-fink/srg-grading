@@ -1,4 +1,5 @@
 //! Local course administration and synchronization commands.
+mod admin_portal;
 mod exercise_files;
 mod exercises;
 mod lifecycle;
@@ -35,6 +36,8 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Serve durable validation/confirmation requests from the admin portal.
+    AdminWork(admin_portal::Options),
     Migrate,
     Exercise {
         #[command(subcommand)]
@@ -190,7 +193,11 @@ async fn pool(args: &Args) -> Result<PgPool> {
     )
     .await
 }
+tokio::task_local! { static PORTAL_OPERATOR: String; }
 fn operator() -> String {
+    if let Ok(actor) = PORTAL_OPERATOR.try_with(Clone::clone) {
+        return actor;
+    }
     std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "host-root".into())
@@ -209,6 +216,7 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     let operation = match &args.command {
+        Command::AdminWork(_) => "admin_worker",
         Command::Migrate => "migrate",
         Command::Exercise { .. } => "exercise",
         Command::Admin { .. } => "admin",
@@ -224,7 +232,10 @@ async fn main() -> Result<()> {
         Command::Work { .. } => "task_worker",
         Command::Sync => "repository_sync",
     };
-    let supervised = matches!(args.command, Command::Work { .. } | Command::Sync);
+    let supervised = matches!(
+        args.command,
+        Command::Work { .. } | Command::Sync | Command::AdminWork(_)
+    );
     let started = std::time::Instant::now();
     tracing::info!(operation, "CLI operation started");
     let outcome = run(args)
@@ -254,6 +265,7 @@ async fn main() -> Result<()> {
 
 async fn run(args: Args) -> Result<()> {
     match &args.command {
+        Command::AdminWork(options) => admin_portal::work(&args, options).await?,
         Command::Exercise { command } => {
             let pool = pool(&args).await?;
             match command {
@@ -552,6 +564,9 @@ async fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 async fn export(pool: &PgPool, course: &str, output: &Path) -> Result<()> {
+    write_new(output, &export_csv(pool, course).await?).await
+}
+async fn export_csv(pool: &PgPool, course: &str) -> Result<Vec<u8>> {
     let students: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT github_id,student_id,name FROM enrollments WHERE course_id=$1 ORDER BY student_id",
     )
@@ -603,7 +618,7 @@ async fn export(pool: &PgPool, course: &str, output: &Path) -> Result<()> {
             ])?;
         }
     }
-    write_new(output, &writer.into_inner()?).await
+    Ok(writer.into_inner()?)
 }
 fn spreadsheet_safe(value: &str) -> String {
     if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {

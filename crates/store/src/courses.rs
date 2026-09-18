@@ -16,7 +16,7 @@ pub struct RosterRow {
     pub github_username: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedStudent {
     pub row: RosterRow,
     pub github_id: i64,
