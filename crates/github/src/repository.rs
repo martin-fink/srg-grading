@@ -430,16 +430,21 @@ impl GitHub {
             "seeded files do not match pinned template"
         );
         self.empty(Method::PUT,&format!("{path}/actions/permissions/workflow"),Some(json!({"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}))).await?;
-        self.empty(
-            Method::PUT,
-            &format!("{path}/actions/permissions"),
-            Some(json!({"enabled":true})),
-        )
-        .await?;
         Ok(())
     }
 
+    /// Student pushes must never execute outside the grading sandbox.
+    pub async fn disable_actions(&self, repository: &str) -> Result<()> {
+        self.empty(
+            Method::PUT,
+            &format!("{}/actions/permissions", repo_path(repository)?),
+            Some(json!({"enabled":false})),
+        )
+        .await
+    }
+
     pub async fn invite(&self, repository: &str, github_id: i64) -> Result<Option<String>> {
+        self.disable_actions(repository).await?;
         let account = self.account(github_id).await?;
         let path = repo_path(repository)?;
         let permission: Option<Value> = self

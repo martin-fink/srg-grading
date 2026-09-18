@@ -402,6 +402,7 @@ async fn observe(context: &ContextData, id: Uuid) -> Result<()> {
         .github
         .verify_repository(&full_name, repository.github_repo_id.context("missing ID")?)
         .await?;
+    context.github.disable_actions(&full_name).await?;
     context.github.verify_no_teams(&full_name).await?;
     let permission = context
         .github

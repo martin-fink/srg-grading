@@ -71,7 +71,7 @@ Verify these API needs in a disposable organization before enrolling anyone:
 - Repository administration/write for private creation, permission management,
   branch defaults, and organization policy inspection where required.
 - Contents/write for exact tree seeding and source reads; workflows/write for
-  provisioning protected workflow files; Actions/write for disabling/enabling
+  provisioning protected workflow files; Actions/write for disabling
   workflows and setting read-only token defaults.
 - Checks/write for official results, repository metadata/read, and the required
   collaborator/invitation APIs. Organization members/read may be needed for the
@@ -86,9 +86,11 @@ Confirm that students have only write access and no organization role granting
 additional repository rights. The private marker and repository numeric ID are
 checked during recovery; moving or replacing a repository is not silently adopted.
 
-Public Actions templates must run the same test cases, use pinned external Actions,
-and have no official-grade, App, manifest, or cluster credentials. Provisioning
-starts from a pinned tree without carrying private solution history.
+GitHub Actions is disabled before students are invited and remains disabled after
+seeding. Synchronization disables Actions on existing repositories too; run
+`gradingctl sync` when upgrading. Students receive public-test feedback in the portal.
+Keep organization secrets and self-hosted runner groups inaccessible as additional
+protection. Provisioning starts from a pinned tree without private solution history.
 
 ## Executor and sandbox contract
 
