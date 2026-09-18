@@ -5,9 +5,6 @@ The deployment is maintained in
 under `modules/grading/`. That is the source of truth for Kubernetes resources,
 nginx on the public VM and Astrid, the existing internal CA, SOPS keys, storage,
 worker isolation, synchronization/backup timers, administration, and cutover.
-The old prototype Compose stack, systemd units, nginx fragment, backup script,
-and Kubernetes sample have been removed to avoid maintaining two deployments.
-
 This repository retains:
 
 - The root flake and lock file, Rust application and migrations.
@@ -26,11 +23,9 @@ Jobs run in Kubernetes. There is no image build/load step or Python CLI wrapper.
 See [operations](operations.md) for the application's runtime contracts,
 [grading](grading.md) for the execution protocol, and [acceptance](acceptance.md)
 for validation still required against real GitHub, gVisor, networking, and backups.
-Course repositories own exercise profiles, images, tests and solutions. Operators
-install reviewed runtime profiles on Mickey and restart `grading-executor`; no
-cluster rebuild is needed when exercises change. Register worker capabilities using
-the real CLI under the operator account on Astrid. The cluster supplies connection
-settings, credentials and sandbox limits. No sample image is approved by default.
+Course repositories own templates, grader scripts, tests and solutions. The cluster
+supplies credentials, sandbox limits and an approved shared runner policy. Register
+the worker as `registered-v1`. No sample runner digest is approved by default.
 
 ## Shared runner and central exercise registration
 
@@ -38,7 +33,7 @@ Schema version 3 removes image builds from `gradingctl exercise add/update`.
 Build/publish the root flake's `runner-image` separately, then list its immutable
 digest in `registry.runner_images` and pass `--runner-image` when registering an
 exercise. The image contains only runtimes/tools; private grader files must never
-be baked into it. No per-exercise profile file is needed. Schema 1/2 remain supported.
+be baked into it. No per-exercise profile file is needed. Only exercise schema 3 is supported.
 
 Run registration on Astrid with the operator credential, GitHub App configuration,
 and the application's artifact directory. Registration pins and retains the grader
@@ -46,7 +41,7 @@ snapshot there. Mickey fetches accepted student and grader snapshots over the
 lease-authenticated internal API; it receives no GitHub token. The source gateway
 preserves the existing App credential boundary rather than minting tokens for Jobs.
 
-Apply migrations through 0005 and updated grants; upgrade web/tasks/executor together.
+Apply migrations through 0006 and updated grants; upgrade web/tasks/executor together.
 Include grader artifacts in the existing application-volume backups. Existing student
 Git trees stay pinned; `--existing` changes only subsequent grading runs.
 
@@ -69,3 +64,8 @@ Local `course apply` reads current file contents without Git. The new
 for each named course and needs the same operator/App/artifact access as registration.
 Allow terminal stdin for typed removal confirmation; noninteractive removals are
 refused. Migration 0005 supports retirement without deleting repositories or grades.
+
+Migration 0006 removes the unused fixed-test results table. Earlier grader schemas
+and local-profile configurations are unsupported; register exercises with schema 3
+and update executor configuration before resuming grading. Historical fixed-test
+report artifacts remain retained, but their revisions cannot be executed.

@@ -83,31 +83,22 @@ and heartbeat every 30 seconds. Each worker has one live lease, and a repository
 has at most one active grading lease. Queue acquisition uses transactional locking
 and `SKIP LOCKED`; transactions end before external work starts.
 
-For legacy profiles, before fetching/extracting source, the executor checks its local, instructor-owned
-allowlist of profile commands, image digests, time limits, and resource caps. It then
-verifies the source digest, SHA, and private manifest. No server-supplied command is
-executed. The local execution profile is a separate trust boundary from course data.
+Before fetching source, the executor validates the shared-runner revision against
+its approved registry namespace, explicit runner digest allowlist and resource caps.
+It verifies student/grader snapshot digests, commits and the integrity manifest.
 
-For each public functional test, a fresh gVisor Job receives read-only source and
-stdin files via per-lease PVC subpaths, plus ephemeral workspace/tmp volumes. The
-Job has no secrets, service-account token, host mounts, or network access. It runs
-as a separate non-root UID with all capabilities dropped, no privilege escalation,
-a read-only root filesystem, and bounded CPU/memory/storage/time. The namespace's
-NetworkPolicy, node runtime, PID limit, and log rotation must be enforced by the
-cluster; the application cannot establish those host properties by itself.
-
-The trusted executor uses the Pod's exit status and compares bounded stdout against
-the approved expected output. Stderr is redirected to bounded ephemeral storage,
-not treated as a score. Each test starts fresh, including any profile build step.
-This avoids trusting a student-written result file or a `passed` marker. It is a
-functional-test harness, not a universal secure harness for in-process unit tests.
-Completed test failures score normally; timeout, OOM/infrastructure failure, and
-integrity failure do not produce a fabricated zero-point total.
+The trusted controller mounts the private grader at `/grader` and orchestrates
+isolated student Jobs through `/platform/grading-run`. Student Jobs receive no
+private grader, expected answers, control channel or credentials. They run as a
+separate non-root UID with gVisor, read-only source, ephemeral workspace volumes,
+dropped capabilities and bounded resources. The cluster enforces network denial,
+PID limits and log rotation. The instructor script interprets bounded student
+output and returns a bounded final score. Timeout, OOM and infrastructure failures
+produce no fabricated zero-point total.
 
 Results are accepted only from the owning worker and current unexpired lease.
 The web service independently verifies SHA, revision, image, resource profile,
-test completeness/uniqueness, and bounds, then calculates integer points from the
-approved cases. Identical retries are idempotent; conflicting replays fail. A new
+score bounds and private-baseline provenance. Identical retries are idempotent; conflicting replays fail. A new
 regrade creates a new run rather than overwriting a completed result. Official
 GitHub Checks are published from a durable outbox for the exact commit.
 
@@ -129,12 +120,12 @@ of unregistered SHAs are not implemented.
 ## Registered scripts and private decisions
 
 Centrally registered exercises use [the script protocol](exercises.md). Each revision
-pins template and grader commits, student/grader image digests, script commands and
+pins template and grader commits, a shared runner digest, script commands and
 resource caps. The executor independently checks the configured registry namespace
 and resource limits. Integrity verification precedes all script/student execution.
 
-Schema versions 2 and 3 run an instructor-owned controller with arbitrary test logic.
-Version 3 uses a shared runner image and stages the pinned grader snapshot through
+Schema version 3 runs an instructor-owned controller with arbitrary test logic.
+It uses a shared runner image and stages the pinned grader snapshot through
 the lease-scoped API; only the controller mounts that source. No GitHub credentials
 reach the executor or grading Pods.
 It requests isolated student Jobs through a private per-lease file channel. Only

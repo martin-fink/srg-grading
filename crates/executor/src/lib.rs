@@ -1,13 +1,13 @@
-//! Independently approved Kubernetes execution profiles and sandbox job construction.
+//! Approved shared runners and Kubernetes sandbox job construction.
 use anyhow::{Result, ensure};
 use grading_core::{
     config::{Resources, identifier},
     protocol::Lease,
 };
 use k8s_openapi::api::batch::v1::Job;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,18 +20,7 @@ pub struct Config {
     pub runtime_class: String,
     pub source_pvc: String,
     pub staging_root: PathBuf,
-    #[serde(default)]
-    pub profiles: BTreeMap<String, Profile>,
     pub registry: Option<Registry>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    pub images: Vec<String>,
-    pub command: Vec<String>,
-    pub resources: Resources,
-    pub timeout_seconds: u32,
 }
 
 #[derive(Clone, Deserialize)]
@@ -46,13 +35,10 @@ pub struct Registry {
 
 impl Config {
     pub fn profile_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.profiles.keys().cloned().collect();
-        if self.registry.is_some() {
-            names.push("registered-v1".into());
-        }
-        names
+        vec!["registered-v1".into()]
     }
-    pub fn approve(&self, lease: &Lease) -> Result<Profile> {
+
+    pub fn approve(&self, lease: &Lease) -> Result<()> {
         ensure!(
             lease.schema_version == 1 && lease.revision.digest()? == lease.revision_digest,
             "lease revision mismatch"
@@ -75,70 +61,45 @@ impl Config {
             "prototype requires a gvisor RuntimeClass"
         );
         let assignment = &lease.revision.assignment;
-        if assignment.execution_profile == "registered-v1" {
-            let registry = self
-                .registry
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("registered exercises are disabled"))?;
-            registry.resources.validate()?;
-            let prefix = format!("{}/", registry.image_prefix.trim_end_matches('/'));
-            ensure!(
-                prefix.len() > 2
-                    && registry.image_prefix.contains('/')
-                    && registry.image_prefix.bytes().all(|b| b.is_ascii_lowercase()
-                        || b.is_ascii_digit()
-                        || b"./:_-".contains(&b)),
-                "invalid registry prefix"
-            );
-            let grader = lease
-                .revision
-                .grader
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing grader provenance"))?;
-            ensure!(
-                assignment.image.starts_with(&prefix) && grader.image.starts_with(&prefix),
-                "image outside approved registry namespace"
-            );
-            if grader.source_digest.is_some() {
-                ensure!(
-                    registry.runner_images.contains(&assignment.image),
-                    "shared runner digest is not approved"
-                );
-            }
-            ensure!(
-                assignment.resources.fits(&registry.resources)
-                    && assignment.timeout_seconds <= registry.timeout_seconds,
-                "exercise exceeds worker caps"
-            );
-            return Ok(Profile {
-                images: vec![assignment.image.clone()],
-                command: vec!["/bin/student".into()],
-                resources: registry.resources.clone(),
-                timeout_seconds: registry.timeout_seconds,
-            });
-        }
-        let profile = self
-            .profiles
-            .get(&assignment.execution_profile)
-            .ok_or_else(|| anyhow::anyhow!("unapproved execution profile"))?;
+        let registry = self
+            .registry
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("registered exercises are disabled"))?;
+        registry.resources.validate()?;
+        let prefix = format!("{}/", registry.image_prefix.trim_end_matches('/'));
         ensure!(
-            profile.images.contains(&assignment.image)
-                && assignment.resources.fits(&profile.resources)
-                && assignment.timeout_seconds <= profile.timeout_seconds,
-            "unapproved image or resource budget"
+            prefix.len() > 2
+                && registry.image_prefix.contains('/')
+                && registry
+                    .image_prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"./:_-".contains(&b)),
+            "invalid registry prefix"
+        );
+        let grader = lease
+            .revision
+            .grader
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing grader provenance"))?;
+        ensure!(
+            assignment.image.starts_with(&prefix) && grader.image.starts_with(&prefix),
+            "image outside approved registry namespace"
         );
         ensure!(
-            !profile.command.is_empty()
-                && profile.command[0].starts_with('/')
-                && profile.command.iter().all(|s| !s.contains('\0')),
-            "invalid instructor command"
+            registry.runner_images.contains(&assignment.image),
+            "shared runner digest is not approved"
         );
-        Ok(profile.clone())
+        ensure!(
+            assignment.resources.fits(&registry.resources)
+                && assignment.timeout_seconds <= registry.timeout_seconds,
+            "exercise exceeds worker caps"
+        );
+        Ok(())
     }
 }
 
-pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Result<Job> {
-    let profile = config.approve(lease)?;
+fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Result<Job> {
+    config.approve(lease)?;
     ensure!(identifier(test_id), "invalid test ID");
     let id = lease.lease_token.simple().to_string();
     let name = format!("grade-{}-{}", &id[..16], test_id.to_lowercase());
@@ -147,7 +108,7 @@ pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Res
         "test IDs used in jobs must be DNS-compatible"
     );
     let resources = &lease.revision.assignment.resources;
-    let mut command = vec![
+    let command = vec![
         "/bin/sh".to_string(),
         "-c".into(),
         "cp -R /source/. /workspace/ && cd /workspace && exec \"$@\" < /input/stdin".into(),
@@ -156,7 +117,6 @@ pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Res
         "-c".into(),
         include_str!("../../../scripts/capture-execution.py").into(),
     ];
-    command.extend(profile.command.clone());
     Ok(serde_json::from_value(json!({
         "apiVersion":"batch/v1","kind":"Job",
         "metadata":{"name":name,"namespace":config.namespace,"labels":{"app":"grading-sandbox","grading-lease":id}},
@@ -179,7 +139,7 @@ pub fn job(config: &Config, lease: &Lease, test_id: &str, remaining: u32) -> Res
 }
 
 /// The private checker sees immutable source and public outcomes in a different Pod.
-pub fn private_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job> {
+fn controller_base_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job> {
     config.approve(lease)?;
     let grader = lease
         .revision
@@ -200,30 +160,6 @@ pub fn private_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job
     Ok(serde_json::from_value(value)?)
 }
 
-/// Run one private input using the public student image, without the checker or answer.
-pub fn private_test_job(
-    config: &Config,
-    lease: &Lease,
-    test_id: &str,
-    remaining: u32,
-) -> Result<Job> {
-    let grader = lease
-        .revision
-        .grader
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("missing grader"))?;
-    ensure!(
-        grader.tests.iter().any(|t| t.id == test_id),
-        "unregistered private test"
-    );
-    let mut value = serde_json::to_value(job(config, lease, test_id, remaining)?)?;
-    let id = lease.lease_token.simple().to_string();
-    value["metadata"]["name"] = json!(format!("probe-{}-{test_id}", &id[..16]));
-    value["spec"]["template"]["spec"]["containers"][0]["volumeMounts"][1]["subPath"] =
-        json!(format!("runs/{id}/private-inputs/{test_id}"));
-    Ok(serde_json::from_value(value)?)
-}
-
 /// The instructor controller can request commands but cannot select images or mount secrets.
 pub fn controller_job(config: &Config, lease: &Lease, remaining: u32) -> Result<Job> {
     let workflow = lease
@@ -240,7 +176,7 @@ pub fn controller_job(config: &Config, lease: &Lease, remaining: u32) -> Result<
     } else {
         &workflow.public_command
     };
-    let mut value = serde_json::to_value(private_job(config, lease, remaining)?)?;
+    let mut value = serde_json::to_value(controller_base_job(config, lease, remaining)?)?;
     let id = lease.lease_token.simple().to_string();
     let pod = &mut value["spec"]["template"]["spec"];
     pod["securityContext"]["runAsUser"] = json!(10004);

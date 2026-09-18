@@ -139,7 +139,6 @@ pub async fn apply(pool: &PgPool, args: &super::Args, options: &Apply) -> Result
                 existing: entry.existing,
                 reason: options.reason.clone(),
                 dry_run: true,
-                build_config: None,
                 runner_image: entry.runner_image.clone(),
             };
             let item = super::exercises::prepare(

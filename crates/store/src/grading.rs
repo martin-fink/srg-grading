@@ -170,46 +170,11 @@ pub async fn accept(
         .as_str()
         .unwrap_or("infrastructure_failed")
         .to_owned();
-    let public_points = if let Some(baseline) = &lease.baseline {
-        Some(baseline.points)
-    } else if lease
-        .revision
-        .grader
-        .as_ref()
-        .is_some_and(|g| g.workflow.is_some())
-    {
-        points
-    } else {
-        matches!(result.status, grading_core::protocol::RunStatus::Completed).then(|| {
-            result
-                .tests
-                .iter()
-                .filter(|t| t.passed)
-                .map(|t| {
-                    lease
-                        .revision
-                        .tests
-                        .tests
-                        .iter()
-                        .find(|p| p.id == t.id)
-                        .expect("validated test")
-                        .points
-                })
-                .sum::<i32>()
-        })
-    };
+    let public_points = lease.baseline.as_ref().map(|b| b.points).or(points);
     sqlx::query("UPDATE grading_runs SET status=$2,points=$3,report_digest=$4,result_digest=$5,completed_at=now(),public_points=$6 WHERE id=$1")
         .bind(result.run_id).bind(status).bind(points).bind(report).bind(hash).bind(public_points).execute(&mut *tx).await?;
     if result.status == grading_core::protocol::RunStatus::Invalidated {
         sqlx::query("UPDATE student_repositories SET needs_review=true WHERE id=(SELECT s.repository_id FROM submissions s JOIN grading_runs g ON g.submission_id=s.id WHERE g.id=$1)").bind(result.run_id).execute(&mut *tx).await?;
-    }
-    for test in &result.tests {
-        sqlx::query("INSERT INTO test_results(run_id,test_id,passed) VALUES($1,$2,$3)")
-            .bind(result.run_id)
-            .bind(&test.id)
-            .bind(test.passed)
-            .execute(&mut *tx)
-            .await?;
     }
     for finding in &result.findings {
         sqlx::query("INSERT INTO integrity_findings(run_id,path,reason) VALUES($1,$2,$3) ON CONFLICT DO NOTHING").bind(result.run_id).bind(&finding.path).bind(&finding.reason).execute(&mut *tx).await?;
@@ -339,7 +304,7 @@ pub async fn enqueue_private(
             definition.grader.as_ref().is_some_and(|g| g
                 .workflow
                 .as_ref()
-                .is_none_or(|w| w.private_command.is_some())),
+                .is_some_and(|w| w.private_command.is_some())),
             "exercise has no private grading command"
         );
         if let Some(run)=sqlx::query_scalar("SELECT id FROM grading_runs WHERE public_run_id=$1 AND revision_digest=$2 ORDER BY attempt DESC LIMIT 1").bind(baseline).bind(&revision).fetch_optional(&mut *tx).await? {

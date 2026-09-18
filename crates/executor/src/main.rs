@@ -6,14 +6,14 @@ use clap::Parser;
 use grading_core::diagnostics::{HttpStatus, Stage};
 use grading_core::{
     integrity::{MAX_SNAPSHOT_BYTES, Snapshot},
-    protocol::{Heartbeat, Lease, LeaseRequest, RunResult, RunStatus, TestResult},
+    protocol::{Heartbeat, Lease, LeaseRequest, RunResult, RunStatus},
     security::digest,
 };
-use grading_executor::{Config, job, private_job, private_test_job};
+use grading_executor::Config;
 use k8s_openapi::api::{batch::v1::Job, core::v1::Pod};
 use kube::{
     Api, Client,
-    api::{DeleteParams, ListParams, LogParams, PostParams},
+    api::{DeleteParams, ListParams, LogParams},
 };
 use reqwest::Client as HttpClient;
 use std::{
@@ -231,8 +231,6 @@ fn initial_result(lease: &Lease) -> RunResult {
     RunResult {
         logs: vec![],
         score: None,
-        private_tests: vec![],
-        private: None,
         schema_version: 1,
         lease_token: lease.lease_token,
         run_id: lease.run_id,
@@ -241,7 +239,6 @@ fn initial_result(lease: &Lease) -> RunResult {
         image: lease.revision.assignment.image.clone(),
         resources: lease.revision.assignment.resources.clone(),
         status: RunStatus::InfrastructureFailed,
-        tests: vec![],
         findings: vec![],
     }
 }
@@ -373,182 +370,17 @@ async fn execute_inner(
             "private grading is not open yet"
         );
     }
-    if lease
-        .revision
-        .grader
-        .as_ref()
-        .is_some_and(|g| g.workflow.is_some())
-    {
-        match workflow::execute(config, jobs, pods, lease, &directory, logs).await? {
-            workflow::Outcome::Scored(score) => {
-                result.status = if score.invalidated {
-                    RunStatus::Invalidated
-                } else {
-                    RunStatus::Completed
-                };
-                result.score = Some(score);
-            }
-            workflow::Outcome::Failed(status) => result.status = status,
+    match workflow::execute(config, jobs, pods, lease, &directory, logs).await? {
+        workflow::Outcome::Scored(score) => {
+            result.status = if score.invalidated {
+                RunStatus::Invalidated
+            } else {
+                RunStatus::Completed
+            };
+            result.score = Some(score);
         }
-        return Ok(result);
+        workflow::Outcome::Failed(status) => result.status = status,
     }
-    let started = Instant::now();
-    let deadline = Duration::from_secs(u64::from(lease.revision.assignment.timeout_seconds));
-    for test in &lease.revision.tests.tests {
-        let input = directory.join("inputs").join(&test.id);
-        tokio::fs::create_dir_all(&input).await?;
-        write(&input.join("stdin"), test.stdin.as_bytes(), false).await?;
-        let remaining = deadline.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            result.status = RunStatus::TimedOut;
-            result.tests.clear();
-            result.private_tests.clear();
-            return Ok(result);
-        }
-        let definition = job(config, lease, &test.id, remaining.as_secs().max(1) as u32)?;
-        let name = definition.metadata.name.as_deref().context("job name")?;
-        jobs.create(&PostParams::default(), &definition)
-            .await
-            .context(Stage("student_job_create"))?;
-        let (success, output) = match logs::wait(
-            jobs,
-            pods,
-            name,
-            started,
-            deadline,
-            logs,
-            lease.baseline.is_none(),
-            false,
-        )
-        .await?
-        {
-            JobOutcome::Output(success, output) => (success == 0, output),
-            JobOutcome::Failed(status) => {
-                result.status = status;
-                result.tests.clear();
-                result.private_tests.clear();
-                return Ok(result);
-            }
-        };
-        let passed = success && output.len() <= 65536 && output == test.stdout;
-        let log = if output.len() > 65536 {
-            "Output exceeded 64 KiB".into()
-        } else {
-            output
-        };
-        result.tests.push(TestResult {
-            id: test.id.clone(),
-            passed,
-            log,
-        });
-        jobs.delete(name, &DeleteParams::default()).await?;
-    }
-    if let Some(grader) = &lease.revision.grader
-        && lease.baseline.is_some()
-    {
-        for test in &grader.tests {
-            let input = directory.join("private-inputs").join(&test.id);
-            tokio::fs::create_dir_all(&input).await?;
-            write(&input.join("stdin"), test.stdin.as_bytes(), false).await?;
-            let remaining = deadline.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                result.status = RunStatus::TimedOut;
-                result.tests.clear();
-                result.private_tests.clear();
-                return Ok(result);
-            }
-            let definition =
-                private_test_job(config, lease, &test.id, remaining.as_secs().max(1) as u32)?;
-            let name = definition
-                .metadata
-                .name
-                .as_deref()
-                .context("private test job name")?;
-            jobs.create(&PostParams::default(), &definition)
-                .await
-                .context(Stage("student_job_create"))?;
-            match logs::wait(
-                jobs,
-                pods,
-                name,
-                started,
-                deadline,
-                logs,
-                lease.baseline.is_none(),
-                false,
-            )
-            .await?
-            {
-                JobOutcome::Output(success, output) => result
-                    .private_tests
-                    .push(test.outcome(success == 0, &output)),
-                JobOutcome::Failed(status) => {
-                    result.status = status;
-                    result.tests.clear();
-                    result.private_tests.clear();
-                    return Ok(result);
-                }
-            }
-            jobs.delete(name, &DeleteParams::default()).await?;
-        }
-        let public_points = lease.baseline.as_ref().unwrap().points;
-        let public = directory.join("public");
-        tokio::fs::create_dir(&public).await?;
-        write(&public.join("results.json"), &serde_json::to_vec(&serde_json::json!({"schema_version":1,"public_points":public_points,"max_points":lease.revision.assignment.max_points,"tests":result.tests,"private_tests":result.private_tests}))?,false).await?;
-        let remaining = deadline.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            result.status = RunStatus::TimedOut;
-            result.tests.clear();
-            result.private_tests.clear();
-            return Ok(result);
-        }
-        let definition = private_job(config, lease, remaining.as_secs().max(1) as u32)?;
-        let name = definition
-            .metadata
-            .name
-            .as_deref()
-            .context("checker job name")?;
-        jobs.create(&PostParams::default(), &definition)
-            .await
-            .context(Stage("student_job_create"))?;
-        let outcome = logs::wait(
-            jobs,
-            pods,
-            name,
-            started,
-            deadline,
-            logs,
-            lease.baseline.is_none(),
-            false,
-        )
-        .await?;
-        jobs.delete(name, &DeleteParams::default()).await?;
-        let output = match outcome {
-            JobOutcome::Output(0, output) if output.len() <= 65536 => output,
-            JobOutcome::Failed(status) => {
-                result.status = status;
-                result.tests.clear();
-                result.private_tests.clear();
-                return Ok(result);
-            }
-            _ => {
-                result.tests.clear();
-                result.private_tests.clear();
-                return Ok(result);
-            }
-        };
-        let decision: grading_core::protocol::PrivateDecision = serde_json::from_str(&output)?;
-        decision.validate(public_points, lease.revision.assignment.max_points)?;
-        let invalidated = decision.invalidated;
-        result.private = Some(decision);
-        result.status = if invalidated {
-            RunStatus::Invalidated
-        } else {
-            RunStatus::Completed
-        };
-        return Ok(result);
-    }
-    result.status = RunStatus::Completed;
     Ok(result)
 }
 

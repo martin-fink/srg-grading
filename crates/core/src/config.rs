@@ -3,15 +3,12 @@ use crate::{integrity::safe_path, security::valid_hex};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CourseConfig {
     pub schema_version: u32,
     pub course: Course,
-    #[serde(default)]
-    pub assignments: BTreeMap<String, Assignment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,10 +98,6 @@ impl CourseConfig {
             "invalid course title"
         );
         self.course.timezone.parse::<chrono_tz::Tz>()?;
-        for (id, assignment) in &self.assignments {
-            ensure!(identifier(id), "invalid assignment ID");
-            assignment.validate()?;
-        }
         Ok(())
     }
 }
@@ -133,7 +126,7 @@ impl Assignment {
         );
         validate_image(&self.image)?;
         ensure!(
-            identifier(&self.execution_profile),
+            self.execution_profile == "registered-v1",
             "invalid execution profile"
         );
         safe_path(&self.integrity_manifest)?;

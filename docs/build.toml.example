@@ -1,4 +1,0 @@
-# Read by gradingctl on a dedicated trusted instructor build machine.
-registry_prefix = "registry.example.invalid/grading"
-work_dir = "/var/lib/grading-builds"
-registry_auth_file = "/run/secrets/registry-auth.json"

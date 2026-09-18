@@ -1,4 +1,0 @@
-[
-  {"input": "Goodbye\n", "expected": "Goodbye\n"},
-  {"input": "one\ntwo\nthree\n", "expected": "one\ntwo\nthree\n"}
-]

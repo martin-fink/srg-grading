@@ -1,0 +1,21 @@
+title = "Echo exercise"
+opens_at = 2026-01-01T00:00:00Z
+deadline = 2026-12-31T23:59:00Z
+branch = "main"
+template = "example-course-org/echo-template"
+template_revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+image = "ghcr.io/example-course-org/echo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+integrity_manifest = "integrity.toml"
+public_tests = "tests/public.json"
+execution_profile = "registered-v1"
+max_points = 20
+timeout_seconds = 60
+
+[resources]
+cpu = 1
+memory_gib = 1
+storage_gib = 1
+
+[score]
+source = "public-tests"
+selection = "latest-eligible-submission"

@@ -104,7 +104,6 @@ async fn publish_in_transaction(
             let mut combined: Revision = serde_json::from_value(definition)?;
             // Preserve the original template manifest and dates; only grading changes.
             combined.grader = revision.grader.clone();
-            combined.tests = revision.tests.clone();
             combined.assignment.image = revision.assignment.image.clone();
             combined.assignment.execution_profile = revision.assignment.execution_profile.clone();
             combined.assignment.resources = revision.assignment.resources.clone();

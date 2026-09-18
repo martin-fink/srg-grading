@@ -1,4 +1,3 @@
-# Configuration format example only. The cluster generates its own executor TOML.
 api_url = "https://grading-worker.example.invalid"
 token_file = "/run/secrets/worker-token"
 tls_identity_file = "/run/secrets/worker-client.pem"
@@ -8,13 +7,14 @@ runtime_class = "gvisor"
 source_pvc = "grading-source"
 staging_root = "/var/lib/grading-executor"
 
-[profiles.functional-v1]
-# Replace with an independently reviewed image digest and instructor command.
-images = ["ghcr.io/example-course-org/echo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-command = ["/bin/sh", "-c", "exec /workspace/src/solution.sh"]
+# One registry policy for all centrally registered exercises.
+[registry]
+image_prefix = "registry.example.invalid/grading"
+# Explicitly reviewed shared runner digests; never bake course files into these.
+runner_images = ["registry.example.invalid/grading/runner@sha256:REPLACE_WITH_64_HEX_DIGEST"]
 timeout_seconds = 86400
 
-[profiles.functional-v1.resources]
+[registry.resources]
 cpu = 10
 memory_gib = 32
 storage_gib = 64

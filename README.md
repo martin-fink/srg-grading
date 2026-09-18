@@ -1,6 +1,6 @@
-# Repository-first grading prototype
+# Student assignment grading
 
-A Rust 2024 prototype for GitHub-based, individual course assignments. PostgreSQL
+A Rust 2024 application for GitHub-based, individual course assignments. PostgreSQL
 stores application state and durable tasks; Axum and Askama serve a small website.
 The interface uses TUM blue (`#0065BD`), plain typography, local CSS, and ordinary
 forms. It has no frontend build step, CDN, or JavaScript dependency.
@@ -65,7 +65,7 @@ the `.#` build commands.
 | `store` | Migrations, sessions, imports, score views, durable leases, artifact metadata |
 | `github` | App JWTs/tokens, PKCE authorization, repository APIs, Checks |
 | `web` | Login, assignment dashboard, forms, plain-text reports, worker listener |
-| `executor` | Independent profile approval, gVisor Jobs, trusted output comparison |
+| `executor` | Runner approval, gVisor Jobs, trusted script scoring |
 | `cli` | Imports, admin changes, queue processing, synchronization, exports |
 
 The three binaries are `grading-web`, `gradingctl`, and `grading-executor`.
@@ -111,9 +111,8 @@ without `--recovery-override`. Audit records include the operator, immutable tar
 ID, reason, and timestamp. Host-root provisioning supplies the operator identity.
 
 Course imports read the supplied local TOML file directly, including uncommitted
-edits. Legacy integrity-manifest paths resolve relative to that file. No Git
-repository is needed; the import records a SHA-256 content digest. A metadata-only
-course file needs no GitHub credential. See [course.toml](examples/course.toml).
+edits. No Git repository is needed; the import records a SHA-256 content digest.
+Course files contain metadata only and need no GitHub credential. See [course.toml](examples/course.toml).
 Roster imports preserve omitted enrollments and history.
 
 Apply the complete exercise list from one or more local files:
@@ -140,8 +139,9 @@ override; neither timestamps nor existing event records are rewritten.
 
 ## Register and update exercises
 
-Instructors register template and private grader repositories with
-`gradingctl exercise add`, then advance pinned hashes with `exercise update`.
+Instructors apply template and private grader repositories with
+`gradingctl exercise apply`, then apply catalog changes to advance pinned hashes.
+Individual `exercise add/update` commands are also available.
 Schema version 3 uses a prebuilt shared runner image and mounts the pinned grader
 snapshot only in the trusted controller. Registration builds no images; adding
 exercises needs no per-exercise cluster profile. The root flake provides a baseline
@@ -158,31 +158,17 @@ into subsequent runs for existing repositories, preserving historical runs.
 
 ## Instructor configuration
 
-[The fixture](tests/fixtures/course.toml) illustrates the strict TOML shape, including
-the required timezone, public test path, and execution profile. Its names and image
-digest are placeholders, not a deployable course. CSV columns are exactly
-`student_id,name,github_username`; equivalent TOML uses `[[students]]` entries.
+Use [course.toml](examples/course.toml) for course metadata and
+[exercises.toml](examples/exercises.toml) for the complete exercise catalog.
+Both local files use schema version 1; the private grader's `exercise.toml` uses
+schema version 3. Earlier grader schemas and local execution profiles are unsupported.
+CSV roster columns are exactly `student_id,name,github_username`; equivalent TOML
+uses `[[students]]` entries.
 
-Generate a private manifest from a real pinned template:
-
-```sh
-gradingctl manifest generate \
-  --template ORGANIZATION/TEMPLATE --revision FULL_COMMIT_SHA \
-  --editable src/ --output /courses/systems/integrity/assignment.toml
-```
-
-Commit the manifest and course definition in the private course repository. All
-files outside explicitly editable directory prefixes are protected, and additions
-outside those prefixes fail integrity. `.github/` and `tests/` cannot be editable.
-Reference solutions and private manifests must never be in the student template.
-Pin workflow Actions and image/dependency inputs in the approved template.
-
-Legacy profiles use public stdin/stdout test cases; see
-[the sample suite](tests/fixtures/cases.toml). The independently configured worker
-command executes the student's program, and the trusted executor compares its
-output with those same public expectations. Programs cannot submit official points
-or supply a score file. LLVM, FPGA simulation, and SimBricks need exercise-specific
-profile review and real workload validation before support can be claimed.
+The platform generates integrity manifests from pinned templates. All files outside
+explicitly editable directory prefixes are protected. `.github/` and `tests/` cannot
+be editable. Reference solutions and private tests belong in the private grader
+repository. Pin external Actions and dependencies in student templates.
 
 ## Design references
 

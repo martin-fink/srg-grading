@@ -2,7 +2,7 @@
 use crate::queue;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
-use grading_core::{config::CourseConfig, protocol::Revision, security::valid_hex};
+use grading_core::{config::CourseConfig, security::valid_hex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{FromRow, PgPool};
@@ -27,17 +27,15 @@ pub async fn apply_course(
     pool: &PgPool,
     config: &CourseConfig,
     config_revision: &str,
-    revisions: &[(String, Revision)],
     dry_run: bool,
     operator: &str,
 ) -> Result<()> {
     config.validate()?;
     ensure!(
-        valid_hex(config_revision, 40)
-            || config_revision
-                .strip_prefix("sha256:")
-                .is_some_and(|s| valid_hex(s, 64)),
-        "config revision must be a SHA-256 content digest or legacy Git SHA"
+        config_revision
+            .strip_prefix("sha256:")
+            .is_some_and(|s| valid_hex(s, 64)),
+        "config revision must be a SHA-256 content digest"
     );
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(704312)")
@@ -54,23 +52,6 @@ pub async fn apply_course(
     );
     sqlx::query("INSERT INTO courses(id,title,organization,timezone,config_revision) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO UPDATE SET title=$2,timezone=$4,config_revision=$5,updated_at=now()")
         .bind(&config.course.id).bind(&config.course.title).bind(&config.course.github_organization).bind(&config.course.timezone).bind(config_revision).execute(&mut *tx).await?;
-    for (slug, revision) in revisions {
-        revision.validate()?;
-        ensure!(
-            revision.course_id == config.course.id && revision.assignment_id == *slug,
-            "revision belongs to a different course or assignment"
-        );
-        let id: Uuid = sqlx::query_scalar("INSERT INTO assignments(id,course_id,slug) VALUES($1,$2,$3) ON CONFLICT(course_id,slug) DO UPDATE SET slug=$3 RETURNING id")
-            .bind(Uuid::new_v4()).bind(&config.course.id).bind(slug).fetch_one(&mut *tx).await?;
-        let hash = revision.digest()?;
-        sqlx::query("INSERT INTO assignment_revisions(digest,assignment_id,config_revision,definition,opens_at,deadline,max_points) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING")
-            .bind(&hash).bind(id).bind(config_revision).bind(serde_json::to_value(revision)?).bind(revision.assignment.opens_at).bind(revision.assignment.deadline).bind(revision.assignment.max_points).execute(&mut *tx).await?;
-        sqlx::query("UPDATE assignments SET current_revision=$2 WHERE id=$1")
-            .bind(id)
-            .bind(hash)
-            .execute(&mut *tx)
-            .await?;
-    }
     sqlx::query(
         "INSERT INTO audit_events(operator,action,target,reason) VALUES($1,'course.apply',$2,$3)",
     )

@@ -6,7 +6,7 @@ use chrono::{Duration, Utc};
 use grading_core::{
     config::CourseConfig,
     integrity::{Blob, Manifest, Snapshot},
-    protocol::{Revision, RunResult, RunStatus, TestResult, TestSuite},
+    protocol::{Grader, Revision, RunResult, RunStatus, ScriptScore, Workflow},
     security,
 };
 use grading_store::{
@@ -91,14 +91,15 @@ async fn database_invariants_and_recovery() -> Result<()> {
         .await?;
     assert!(identity::session(&web, &rotated).await?.is_none());
 
-    let mut config = CourseConfig::parse(include_str!("../../../tests/fixtures/course.toml"))?;
-    let assignment = config.assignments.get_mut("echo").unwrap();
+    let config = CourseConfig::parse(include_str!("../../../tests/fixtures/course.toml"))?;
+    let mut assignment: grading_core::config::Assignment =
+        toml::from_str(include_str!("../../../tests/fixtures/assignment.toml"))?;
     assignment.opens_at = Utc::now() - Duration::hours(1);
     assignment.deadline = Utc::now() + Duration::hours(1);
     let source = Snapshot {
         sha: "a".repeat(40),
         files: BTreeMap::from([(
-            "tests/cases.toml".into(),
+            "tests/public.json".into(),
             Blob {
                 mode: "100644".into(),
                 data: "".into(),
@@ -106,20 +107,31 @@ async fn database_invariants_and_recovery() -> Result<()> {
         )]),
     };
     let manifest = Manifest::generate(&source, vec!["src/".into()])?;
+    let grader_digest = Artifacts::new(std::env::var("TEST_ARTIFACT_ROOT")?)
+        .await?
+        .put(&operator, "source", b"grader fixture")
+        .await?;
     let revision = Revision {
-        grader: None,
+        tests: Default::default(),
+        grader: Some(Grader {
+            repository: "org/grader".into(),
+            revision: "c".repeat(40),
+            image: assignment.image.clone(),
+            source_digest: Some(grader_digest),
+            workflow: Some(Workflow {
+                public_command: vec!["/bin/python3".into(), "/grader/public.py".into()],
+                private_command: None,
+            }),
+        }),
         course_id: config.course.id.clone(),
         assignment_id: "echo".into(),
         assignment: assignment.clone(),
         manifest,
-        tests: toml_suite()?,
     };
-    let revisions = vec![("echo".to_string(), revision.clone())];
     courses::apply_course(
         &operator,
         &config,
-        &"b".repeat(40),
-        &revisions,
+        &format!("sha256:{}", "b".repeat(64)),
         true,
         "test-root",
     )
@@ -131,8 +143,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
     courses::apply_course(
         &operator,
         &config,
-        &"b".repeat(40),
-        &revisions,
+        &format!("sha256:{}", "b".repeat(64)),
         false,
         "test-root",
     )
@@ -140,10 +151,21 @@ async fn database_invariants_and_recovery() -> Result<()> {
     courses::apply_course(
         &operator,
         &config,
-        &"b".repeat(40),
-        &revisions,
+        &format!("sha256:{}", "b".repeat(64)),
         false,
         "test-root",
+    )
+    .await?;
+    grading_store::exercises::publish(
+        &operator,
+        grading_store::exercises::Publication {
+            revision: &revision,
+            expected: None,
+            existing: false,
+            dry_run: false,
+            operator: "fixture",
+            reason: "setup",
+        },
     )
     .await?;
     assert!(
@@ -283,7 +305,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
     let run = grading::enqueue_run(&web, submission, false).await?;
     assert_eq!(grading::enqueue_run(&web, submission, false).await?, run);
     let raw_worker = security::token();
-    sqlx::query("INSERT INTO workers(id,token_hash,profiles,resource_caps) VALUES('test-worker',$1,ARRAY['functional-v1'],$2)").bind(security::digest(&raw_worker)).bind(serde_json::to_value(&revision.assignment.resources)?).execute(&operator).await?;
+    sqlx::query("INSERT INTO workers(id,token_hash,profiles,resource_caps) VALUES('test-worker',$1,ARRAY['registered-v1'],$2)").bind(security::digest(&raw_worker)).bind(serde_json::to_value(&revision.assignment.resources)?).execute(&operator).await?;
     let worker = grading::authenticate(&web, &raw_worker).await?;
     assert!(
         grading::lease(&web, &worker, &["unapproved".into()])
@@ -305,9 +327,12 @@ async fn database_invariants_and_recovery() -> Result<()> {
     );
     let result = RunResult {
         logs: vec![],
-        score: None,
-        private_tests: vec![],
-        private: None,
+        score: Some(ScriptScore {
+            schema_version: 1,
+            points: 10,
+            invalidated: false,
+            reason: String::new(),
+        }),
         schema_version: 1,
         lease_token: lease.lease_token,
         run_id: run,
@@ -316,18 +341,6 @@ async fn database_invariants_and_recovery() -> Result<()> {
         image: revision.assignment.image.clone(),
         resources: revision.assignment.resources.clone(),
         status: RunStatus::Completed,
-        tests: vec![
-            TestResult {
-                id: "hello".into(),
-                passed: true,
-                log: "Hello\n".into(),
-            },
-            TestResult {
-                id: "empty".into(),
-                passed: false,
-                log: "forged score: 100000".into(),
-            },
-        ],
         findings: vec![],
     };
     let mut forged = result.clone();
@@ -338,7 +351,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
             .is_err()
     );
     forged = result.clone();
-    forged.tests.push(forged.tests[0].clone());
+    forged.score.as_mut().unwrap().points = 100_000;
     assert!(
         grading::accept(&web, &artifacts, &worker, lease.task_id, &forged)
             .await
@@ -347,7 +360,7 @@ async fn database_invariants_and_recovery() -> Result<()> {
     grading::accept(&web, &artifacts, &worker, lease.task_id, &result).await?;
     grading::accept(&web, &artifacts, &worker, lease.task_id, &result).await?;
     forged = result.clone();
-    forged.tests[1].passed = true;
+    forged.score.as_mut().unwrap().points = 20;
     assert!(
         grading::accept(&web, &artifacts, &worker, lease.task_id, &forged)
             .await
@@ -448,24 +461,4 @@ async fn database_invariants_and_recovery() -> Result<()> {
     assert_eq!(status, "failed");
     exercises::publication_rollout_and_permissions().await?;
     Ok(())
-}
-
-fn toml_suite() -> Result<TestSuite> {
-    Ok(TestSuite {
-        schema_version: 1,
-        tests: vec![
-            grading_core::protocol::PublicTest {
-                id: "hello".into(),
-                points: 10,
-                stdin: "Hello\n".into(),
-                stdout: "Hello\n".into(),
-            },
-            grading_core::protocol::PublicTest {
-                id: "empty".into(),
-                points: 10,
-                stdin: String::new(),
-                stdout: String::new(),
-            },
-        ],
-    })
 }

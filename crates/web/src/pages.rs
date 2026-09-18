@@ -137,7 +137,7 @@ pub fn preview() -> Dashboard {
             AssignmentRow {
                 id: String::new(),
                 course: "Practical Systems".into(),
-                title: "LLVM exercise".into(),
+                title: "C echo exercise".into(),
                 deadline: "26 Oct 2026, 23:59 CET".into(),
                 repository_id: String::new(),
                 repository_url: String::new(),

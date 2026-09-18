@@ -2,8 +2,7 @@
 
 Instructors register GitHub template and private grader repositories with the
 application CLI. No per-exercise executor profile is required. The cluster operator
-configures one approved registry namespace and resource/time caps. Existing legacy
-`profiles` remain supported during migration.
+configures one approved registry namespace and resource/time caps.
 
 ## Instructor workflow
 
@@ -268,7 +267,7 @@ must not use private inputs during public grading or echo sensitive data there.
 
 The public script runs for normal submissions and should implement exactly the
 public rubric. The platform does not prescribe a test format or calculate scores
-from a fixed list of stdin/stdout cases for schema versions 2 and 3.
+from a platform-defined list of cases.
 
 ## Additional private grading after the deadline
 
@@ -310,29 +309,19 @@ The example uses JSON public tests and a custom Python controller to compile C i
 isolated Pods; the private script checks additional inputs and halves the public
 score if they fail. These are example choices, not platform requirements.
 
-Schema version 2 ([example](../examples/scripted-grader/)) retains the old
-`studentImage`/`graderImage` build contract and needs a trusted Nix/Skopeo builder
-with [build.toml.example](build.toml.example). Its images are built per exercise
-revision, never per student submission. New exercises should use schema version 3.
-
-Schema version 1 and legacy local profiles remain supported for existing courses.
-They use the older fixed stdin/stdout suite and adjustment checker, illustrated in
-[the legacy example](../examples/grader/). Their private checks now also require
-manual post-deadline scheduling.
-
 ## Cluster integration change
 
-Configure the executor once using [registered-executor.toml.example](registered-executor.toml.example).
+Configure the executor once using [executor.toml.example](executor.toml.example).
 Register the worker with `--profile registered-v1`. Match the runner repository to
 the registry prefix and list its exact digest in `runner_images`. An empty allowlist
-disables shared runners; historical schema-1/2 registry behavior remains supported.
+disables shared runners. Only exercise schema version 3 is supported.
 Only trusted operators should publish/review reusable runtime images.
 
 Build the example runtime with `nix build .#runner-image`; publishing it to your
 registry is a separate deployment step. No course sources are included. Its contents
-are a baseline for the C/Python example, not a claim of LLVM/FPGA/SimBricks support.
+provide the runtimes for the C/Python example.
 
-Apply migrations through 0005 and updated grants using the owner role. Upgrade
+Apply migrations through 0006 and updated grants using the owner role. Upgrade
 web/tasks/executor together before registering schema 3. Migration 0004 adds a
 foreign-key reference from immutable revisions to their retained grader artifacts;
 back up those artifacts with accepted student snapshots and reports. Migration 0005
@@ -357,3 +346,8 @@ are trusted; they must never execute student code directly in their own Pod.
 Validate actual gVisor mounts, network denial, image pulls, snapshot staging and the
 public/private grading cycle in the cluster before using this with students. Local
 unit/integration tests and image builds do not establish those external properties.
+
+Migration 0006 removes the unused fixed-test results table. Earlier grader schemas
+and local-profile configurations are unsupported; register exercises with schema 3
+and update executor configuration before resuming grading. Historical fixed-test
+report artifacts remain retained, but their revisions cannot be executed.

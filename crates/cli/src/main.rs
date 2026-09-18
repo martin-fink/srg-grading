@@ -7,8 +7,6 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use grading_core::{
     config::{CourseConfig, Resources},
-    integrity::Manifest,
-    protocol::{Revision, TestSuite},
     security,
 };
 use grading_github::{AccountDirectory, GitHub};
@@ -53,10 +51,6 @@ enum Command {
     Roster {
         #[command(subcommand)]
         command: Roster,
-    },
-    Manifest {
-        #[command(subcommand)]
-        command: ManifestCommand,
     },
     Worker {
         #[command(subcommand)]
@@ -127,19 +121,6 @@ enum Roster {
         file: PathBuf,
         #[arg(long)]
         dry_run: bool,
-    },
-}
-#[derive(Subcommand)]
-enum ManifestCommand {
-    Generate {
-        #[arg(long)]
-        template: String,
-        #[arg(long)]
-        revision: String,
-        #[arg(long, required = true)]
-        editable: Vec<String>,
-        #[arg(long)]
-        output: PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -221,7 +202,6 @@ async fn main() -> Result<()> {
         Command::Admin { .. } => "admin",
         Command::Course { .. } => "course_import",
         Command::Roster { .. } => "roster_import",
-        Command::Manifest { .. } => "manifest",
         Command::Worker { .. } => "worker",
         Command::Grades { .. } => "grade_export",
         Command::Extension { .. } => "extension",
@@ -354,55 +334,10 @@ async fn run(args: Args) -> Result<()> {
             let contents = tokio::fs::read_to_string(file).await?;
             let revision = format!("sha256:{}", security::digest(contents.as_bytes()));
             let config = CourseConfig::parse(&contents)?;
-            let github = if config.assignments.is_empty() {
-                None
-            } else {
-                Some(github(&args).await?)
-            };
-            let mut revisions = Vec::new();
-            for (id, assignment) in &config.assignments {
-                let manifest_path = file
-                    .parent()
-                    .unwrap_or(Path::new(""))
-                    .join(&assignment.integrity_manifest);
-                let manifest: Manifest =
-                    toml::from_str(&tokio::fs::read_to_string(&manifest_path).await?)?;
-                let source = github
-                    .as_ref()
-                    .context("assignment needs GitHub access")?
-                    .snapshot(&assignment.template, &assignment.template_revision)
-                    .await?;
-                ensure!(
-                    manifest.check(&source)?.is_empty(),
-                    "template does not match manifest for {id}"
-                );
-                let tests: TestSuite = toml::from_str(&String::from_utf8(
-                    source
-                        .files
-                        .get(&assignment.public_tests)
-                        .context("public test file is missing")?
-                        .bytes()?,
-                )?)?;
-                let revision = Revision {
-                    grader: None,
-                    course_id: config.course.id.clone(),
-                    assignment_id: id.clone(),
-                    assignment: assignment.clone(),
-                    manifest,
-                    tests,
-                };
-                revision.validate()?;
-                println!(
-                    "assignment {id}: approved revision {} (existing repositories retain their revision)",
-                    revision.digest()?
-                );
-                revisions.push((id.clone(), revision));
-            }
             courses::apply_course(
                 &pool(&args).await?,
                 &config,
                 &revision,
-                &revisions,
                 *dry_run,
                 &operator(),
             )
@@ -459,23 +394,6 @@ async fn run(args: Args) -> Result<()> {
                 resolved.len()
             );
         }
-        Command::Manifest {
-            command:
-                ManifestCommand::Generate {
-                    template,
-                    revision,
-                    editable,
-                    output,
-                },
-        } => {
-            let snapshot = github(&args).await?.snapshot(template, revision).await?;
-            let manifest = Manifest::generate(&snapshot, editable.clone())?;
-            write_new(output, toml::to_string_pretty(&manifest)?.as_bytes()).await?;
-            println!(
-                "Wrote manifest for {} protected files",
-                manifest.files.len()
-            );
-        }
         Command::Worker { command } => {
             let pool = pool(&args).await?;
             match command {
@@ -489,7 +407,7 @@ async fn run(args: Args) -> Result<()> {
                 } => {
                     ensure!(
                         grading_core::config::identifier(id)
-                            && profile.iter().all(|p| grading_core::config::identifier(p)),
+                            && profile.as_slice() == ["registered-v1"],
                         "invalid worker or profile ID"
                     );
                     let caps = Resources {

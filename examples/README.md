@@ -11,6 +11,3 @@ Use these together for the shared runner workflow:
 The CLI reads the grader repository at the commit selected by `grader_ref` in the
 local catalog. Commit and push grader changes, then use `main` or the new full SHA.
 Local edits to a grader checkout do not change a previously pinned remote commit.
-
-`grader/`, `template/`, and `scripted-grader/` are legacy compatibility examples.
-Their schema-1/2 image-building contracts do not support `--runner-image`.

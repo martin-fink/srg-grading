@@ -24,13 +24,27 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
     let web = PgPool::connect(&std::env::var("TEST_WEB_DATABASE_URL")?).await?;
     let mut config = CourseConfig::parse(include_str!("../../../../tests/fixtures/course.toml"))?;
     config.course.id = "registered-course".into();
-    let mut assignment = config.assignments["echo"].clone();
+    let mut assignment: grading_core::config::Assignment =
+        toml::from_str(include_str!("../../../../tests/fixtures/assignment.toml"))?;
     assignment.opens_at = Utc::now() - Duration::hours(1);
     assignment.deadline = Utc::now() + Duration::hours(1);
     assignment.execution_profile = "registered-v1".into();
-    config.assignments.clear();
-    courses::apply_course(&operator, &config, &"a".repeat(40), &[], false, "fixture").await?;
+    courses::apply_course(
+        &operator,
+        &config,
+        &format!("sha256:{}", "a".repeat(64)),
+        false,
+        "fixture",
+    )
+    .await?;
+    let first_image = assignment.image.clone();
+    let first_source =
+        grading_store::artifacts::Artifacts::new(std::env::var("TEST_ARTIFACT_ROOT")?)
+            .await?
+            .put(&operator, "source", b"registered grader fixture")
+            .await?;
     let first = Revision {
+        tests: Default::default(),
         course_id: config.course.id.clone(),
         assignment_id: "echo".into(),
         manifest: Manifest {
@@ -38,7 +52,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             template_revision: assignment.template_revision.clone(),
             editable: vec!["src/".into()],
             files: BTreeMap::from([(
-                "tests/cases.toml".into(),
+                "tests/public.json".into(),
                 ProtectedFile {
                     mode: "100644".into(),
                     sha256: "a".repeat(64),
@@ -46,18 +60,15 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             )]),
         },
         assignment,
-        tests: super::toml_suite()?,
         grader: Some(Grader {
-            source_digest: None,
-            workflow: None,
-            tests: vec![grading_core::protocol::PrivateTest {
-                id: "private-one".into(),
-                stdin: "private input".into(),
-                stdout: "private answer".into(),
-            }],
+            source_digest: Some(first_source),
+            workflow: Some(grading_core::protocol::Workflow {
+                public_command: vec!["/bin/python3".into(), "/grader/public.py".into()],
+                private_command: Some(vec!["/bin/python3".into(), "/grader/private.py".into()]),
+            }),
             repository: "org/private".into(),
             revision: "b".repeat(40),
-            image: format!("registry.example/grading/checker@sha256:{}", "c".repeat(64)),
+            image: first_image,
         }),
     };
     let publication = |revision, expected, existing, dry_run| Publication {
@@ -110,7 +121,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
     second
         .manifest
         .files
-        .get_mut("tests/cases.toml")
+        .get_mut("tests/public.json")
         .unwrap()
         .sha256 = "e".repeat(64);
     second.grader.as_mut().unwrap().revision = "f".repeat(40);
@@ -147,8 +158,8 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         first.manifest.template_revision
     );
     assert_eq!(
-        hybrid.manifest.files["tests/cases.toml"].sha256,
-        first.manifest.files["tests/cases.toml"].sha256
+        hybrid.manifest.files["tests/public.json"].sha256,
+        first.manifest.files["tests/public.json"].sha256
     );
     assert_eq!(hybrid.grader.unwrap().revision, "f".repeat(40));
     // New attempts bind to the new grading revision; previous attempts keep their pin.
@@ -186,8 +197,6 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             .await?;
     let mut third = second.clone();
     third.grader.as_mut().unwrap().revision = "1".repeat(40);
-    third.tests.tests.clear();
-    third.grader.as_mut().unwrap().tests.clear();
     third.grader.as_mut().unwrap().workflow = Some(grading_core::protocol::Workflow {
         public_command: vec!["/bin/public".into()],
         private_command: Some(vec!["/bin/private".into()]),
@@ -246,7 +255,6 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             .await?
             .unwrap();
         assert!(lease.baseline.is_none());
-        let scripted = lease.revision.grader.as_ref().unwrap().workflow.is_some();
         let result = grading_core::protocol::RunResult {
             logs: vec![
                 grading_core::protocol::RunLog {
@@ -266,21 +274,8 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
             image: lease.revision.assignment.image.clone(),
             resources: lease.revision.assignment.resources.clone(),
             status: grading_core::protocol::RunStatus::Completed,
-            tests: lease
-                .revision
-                .tests
-                .tests
-                .iter()
-                .map(|t| grading_core::protocol::TestResult {
-                    id: t.id.clone(),
-                    passed: true,
-                    log: String::new(),
-                })
-                .collect(),
             findings: vec![],
-            private: None,
-            private_tests: vec![],
-            score: scripted.then_some(grading_core::protocol::ScriptScore {
+            score: Some(grading_core::protocol::ScriptScore {
                 schema_version: 1,
                 points: 18,
                 invalidated: false,
@@ -356,10 +351,7 @@ pub async fn publication_rollout_and_permissions() -> Result<()> {
         image: lease.revision.assignment.image.clone(),
         resources: lease.revision.assignment.resources.clone(),
         status: grading_core::protocol::RunStatus::Completed,
-        tests: vec![],
         findings: vec![],
-        private: None,
-        private_tests: vec![],
         score: Some(grading_core::protocol::ScriptScore {
             schema_version: 1,
             points: baseline.points / 2,
