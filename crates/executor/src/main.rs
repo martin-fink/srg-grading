@@ -417,6 +417,7 @@ async fn bounded(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8
 
 enum JobOutcome {
     Output(i32, String),
+    StudentFailure(&'static str),
     Failed(RunStatus),
 }
 async fn wait_job(
@@ -463,7 +464,7 @@ async fn wait_job(
                         reason = "oom_killed",
                         "sandbox exceeded memory limit"
                     );
-                    return Ok(JobOutcome::Failed(RunStatus::InfrastructureFailed));
+                    return Ok(JobOutcome::StudentFailure("memory_limit"));
                 }
                 let output = pods
                     .logs(

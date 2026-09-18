@@ -6,6 +6,7 @@ import sys
 import os
 import selectors
 import signal
+import time
 
 # Fail closed: student processes must not inspect the supervisor's descriptors or
 # memory even though they share its unprivileged UID. exec resets dumpability for
@@ -18,6 +19,7 @@ LIMIT = 65536
 buffers = {"stdout": bytearray(), "stderr": bytearray()}
 exit_code = 127
 failure = None
+deadline = time.monotonic() + float(os.environ.get("GRADING_EXECUTION_TIMEOUT", "30"))
 try:
     process = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)
@@ -25,7 +27,11 @@ try:
         selector.register(process.stdout, selectors.EVENT_READ, "stdout")
         selector.register(process.stderr, selectors.EVENT_READ, "stderr")
         while selector.get_map():
-            for key, _ in selector.select():
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                failure = "timeout"
+                break
+            for key, _ in selector.select(min(remaining_time, 0.1)):
                 chunk = os.read(key.fd, 8192)
                 if not chunk:
                     selector.unregister(key.fileobj)
@@ -38,11 +44,18 @@ try:
                     break
             if failure:
                 break
+    if not failure:
+        try:
+            exit_code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            failure = "timeout"
     if failure:
-        os.killpg(process.pid, signal.SIGKILL)
-    exit_code = process.wait() if not failure else 125
-    if failure:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.wait()
+        exit_code = 124 if failure == "timeout" else 125
 except OSError as error:
     buffers["stderr"].extend(str(error).encode("utf-8", errors="replace")[:LIMIT])
 print(json.dumps({

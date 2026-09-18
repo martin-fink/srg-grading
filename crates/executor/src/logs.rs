@@ -47,6 +47,8 @@ struct Output {
     stdout: String,
     stderr: String,
     exit_code: i32,
+    #[serde(default)]
+    failure: Option<String>,
 }
 
 fn decode_output(code: i32, output: &str) -> Result<Output> {
@@ -67,6 +69,13 @@ pub async fn wait(
 ) -> Result<JobOutcome> {
     let outcome = wait_job(jobs, pods, name, started, deadline).await;
     if workflow && let Ok(JobOutcome::Output(code, output)) = &outcome {
+        if *code != 0 {
+            capture.push(
+                student_visible,
+                "Execution supervisor terminated abnormally.\n",
+            );
+            return Ok(JobOutcome::StudentFailure("execution_failed"));
+        }
         let output = decode_output(*code, output)?;
         capture.push(
             student_visible,
@@ -75,7 +84,12 @@ pub async fn wait(
                 output.stdout, output.stderr, output.exit_code
             ),
         );
-        return Ok(JobOutcome::Output(output.exit_code, output.stdout));
+        return Ok(match output.failure.as_deref() {
+            Some("timeout") => JobOutcome::StudentFailure("timeout"),
+            Some("output_limit") => JobOutcome::StudentFailure("output_limit"),
+            Some(_) => anyhow::bail!("unknown execution failure"),
+            None => JobOutcome::Output(output.exit_code, output.stdout),
+        });
     }
     // Fetch even after timeouts or errors, while the Pod still exists.
     match pods
@@ -109,6 +123,9 @@ pub async fn wait(
         Ok(JobOutcome::Output(code, _)) => {
             capture.push(student_visible, &format!("Exit code: {code}\n"))
         }
+        Ok(JobOutcome::StudentFailure(reason)) => {
+            capture.push(student_visible, &format!("Execution failed: {reason}\n"))
+        }
         Ok(JobOutcome::Failed(status)) => {
             capture.push(student_visible, &format!("Execution status: {status:?}\n"))
         }
@@ -132,6 +149,31 @@ mod tests {
         assert_eq!(result["stderr"], "compiler failure\n");
         assert_eq!(result["exit_code"], 2);
     }
+    #[test]
+    fn execution_timeout_kills_children_even_with_closed_output() {
+        for child in [
+            "import time; time.sleep(30)",
+            "import os,time; os.close(1); os.close(2); time.sleep(30)",
+        ] {
+            let started = std::time::Instant::now();
+            let output = std::process::Command::new("python3")
+                .env("GRADING_EXECUTION_TIMEOUT", "0.1")
+                .args([
+                    "-c",
+                    include_str!("../../../scripts/capture-execution.py"),
+                    "python3",
+                    "-c",
+                    child,
+                ])
+                .output()
+                .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(result["failure"], "timeout");
+            assert_eq!(result["exit_code"], 124);
+        }
+    }
+
     #[test]
     fn output_floods_are_stopped_and_both_streams_are_drained() {
         for stream in [1, 2] {

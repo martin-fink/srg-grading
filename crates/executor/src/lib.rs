@@ -220,10 +220,20 @@ pub struct ExecutionRequest {
     pub id: uuid::Uuid,
     pub command: Vec<String>,
     pub stdin: String,
+    #[serde(default = "execution_timeout")]
+    pub timeout_seconds: u32,
 }
+fn execution_timeout() -> u32 {
+    30
+}
+
 impl ExecutionRequest {
     pub fn validate(&self) -> Result<()> {
         grading_core::protocol::validate_command(&self.command)?;
+        ensure!(
+            (1..=3600).contains(&self.timeout_seconds),
+            "execution timeout must be 1..3600 seconds"
+        );
         ensure!(self.stdin.len() <= 65536, "execution input exceeds 64 KiB");
         Ok(())
     }
@@ -237,7 +247,12 @@ pub fn execution_job(
 ) -> Result<Job> {
     request.validate()?;
     let id = request.id.simple().to_string();
-    let mut value = serde_json::to_value(job(config, lease, "script", remaining)?)?;
+    let mut value = serde_json::to_value(job(
+        config,
+        lease,
+        "script",
+        remaining.min(request.timeout_seconds.saturating_add(5)),
+    )?)?;
     value["metadata"]["name"] = json!(format!("exec-{id}"));
     let container = &mut value["spec"]["template"]["spec"]["containers"][0];
     let mut command = vec![
@@ -251,6 +266,7 @@ pub fn execution_job(
     ];
     command.extend(request.command.clone());
     container["command"] = json!(command);
+    container["env"] = json!([{"name":"GRADING_EXECUTION_TIMEOUT", "value":request.timeout_seconds.min(remaining.saturating_sub(5).max(1)).to_string()}]);
     container["volumeMounts"][1]["subPath"] =
         json!(format!("runs/{}/requests/{id}", lease.lease_token.simple()));
     Ok(serde_json::from_value(value)?)

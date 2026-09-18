@@ -154,8 +154,16 @@ async fn serve(
                 )
                 .await?;
                 jobs.delete(name, &DeleteParams::default()).await?;
-                let (exit_code, mut stdout) = match outcome {
-                    JobOutcome::Output(code, stdout) => (code, stdout),
+                let (exit_code, mut stdout, failure) = match outcome {
+                    JobOutcome::Output(code, stdout) => (code, stdout, None),
+                    JobOutcome::StudentFailure(reason) => (
+                        if reason == "timeout" { 124 } else { 125 },
+                        String::new(),
+                        Some(reason),
+                    ),
+                    JobOutcome::Failed(RunStatus::TimedOut) if started.elapsed() < deadline => {
+                        (124, String::new(), Some("timeout"))
+                    }
                     JobOutcome::Failed(status) => return Ok(status),
                 };
                 let truncated = stdout.len() > 65536;
@@ -167,7 +175,7 @@ async fn serve(
                     stdout.truncate(end);
                 }
                 let response = serde_json::to_vec(
-                    &json!({"id":request.id,"exit_code":exit_code,"stdout":stdout,"truncated":truncated}),
+                    &json!({"id":request.id,"exit_code":exit_code,"stdout":stdout,"truncated":truncated,"failure":failure}),
                 )?;
                 let temporary = directory
                     .join("control")

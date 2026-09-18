@@ -139,3 +139,12 @@ instructor-only; student private reports expose scores and status.
 Public baselines and run history remain immutable. Runtime web credentials cannot
 schedule private runs. Template updates affect future repositories; `--existing`
 rolls a grader revision into subsequent runs without changing existing student files.
+
+Each `grading-run` request has its own timeout (30 seconds by default; override with
+`--timeout-seconds N`, 1–3600, still bounded by the assignment deadline). Timeout,
+output overflow, student OOM and abnormal capture termination return a nonzero
+`exit_code` and a `failure` value (`timeout`, `output_limit`, `memory_limit`, or
+`execution_failed`) to the trusted grader. They are failed test executions, not
+successful output or automatic infrastructure retries. Graders must check the exit
+code before comparing stdout. The overall grading deadline and controller failures
+still produce an unresolved run requiring instructor attention.
