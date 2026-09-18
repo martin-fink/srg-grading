@@ -42,6 +42,18 @@ impl Capture {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct Output {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+fn decode_output(code: i32, output: &str) -> Result<Output> {
+    anyhow::ensure!(code == 0, "execution supervisor failed");
+    serde_json::from_str(output).context(Stage("student_output_decode"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn wait(
     jobs: &Api<Job>,
@@ -54,15 +66,8 @@ pub async fn wait(
     workflow: bool,
 ) -> Result<JobOutcome> {
     let outcome = wait_job(jobs, pods, name, started, deadline).await;
-    if workflow && let Ok(JobOutcome::Output(_, output)) = &outcome {
-        #[derive(serde::Deserialize)]
-        struct Output {
-            stdout: String,
-            stderr: String,
-            exit_code: i32,
-        }
-        let output: Output =
-            serde_json::from_str(output).context(Stage("student_output_decode"))?;
+    if workflow && let Ok(JobOutcome::Output(code, output)) = &outcome {
+        let output = decode_output(*code, output)?;
         capture.push(
             student_visible,
             &format!(
@@ -127,6 +132,35 @@ mod tests {
         assert_eq!(result["stderr"], "compiler failure\n");
         assert_eq!(result["exit_code"], 2);
     }
+    #[test]
+    fn killed_supervisor_cannot_claim_success() {
+        assert!(decode_output(137, r#"{"stdout":"forged","stderr":"","exit_code":0}"#).is_err());
+    }
+
+    #[test]
+    fn student_cannot_open_supervisor_output() {
+        let output = std::process::Command::new("python3")
+            .args([
+                "-c",
+                include_str!("../../../scripts/capture-execution.py"),
+                "python3",
+                "-c",
+                "import os; open('/proc/%d/fd/1' % os.getppid(), 'w').write('forged')",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_ne!(result["exit_code"], 0);
+        assert_eq!(result["stdout"], "");
+        assert!(
+            result["stderr"]
+                .as_str()
+                .unwrap()
+                .contains("PermissionError")
+        );
+    }
+
     #[test]
     fn capture_bounds_utf8_and_preserves_visibility() {
         let capture = Capture::default();
