@@ -13,6 +13,55 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub struct SourceQuotaExceeded {
+    pub retry_at: chrono::DateTime<chrono::Utc>,
+}
+impl std::fmt::Display for SourceQuotaExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("source API budget exhausted")
+    }
+}
+impl std::error::Error for SourceQuotaExceeded {}
+
+pub(crate) struct SourceBudget {
+    started: std::time::Instant,
+    total: u32,
+    students: BTreeMap<Uuid, u32>,
+}
+impl Default for SourceBudget {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            total: 0,
+            students: BTreeMap::new(),
+        }
+    }
+}
+impl SourceBudget {
+    fn charge(&mut self, student: Uuid) -> Result<()> {
+        let period = std::time::Duration::from_secs(3600);
+        if self.started.elapsed() >= period {
+            *self = Self::default();
+        }
+        if self.total >= 3600
+            || self.students.get(&student).copied().unwrap_or(0) >= 600
+            || (!self.students.contains_key(&student) && self.students.len() >= 1024)
+        {
+            return Err(SourceQuotaExceeded {
+                retry_at: chrono::Utc::now()
+                    + chrono::Duration::seconds(
+                        period.saturating_sub(self.started.elapsed()).as_secs() as i64 + 1,
+                    ),
+            }
+            .into());
+        }
+        self.total += 1;
+        *self.students.entry(student).or_default() += 1;
+        Ok(())
+    }
+}
+
 fn verify_base_permission(organization: &Value) -> Result<()> {
     let permission = match organization.get("default_repository_permission") {
         Some(Value::String(value)) => match value.as_str() {
@@ -176,6 +225,29 @@ mod tests {
         );
         server.abort();
     }
+    #[test]
+    fn source_budgets_isolate_students_and_reset_after_the_window() {
+        let mut budget = SourceBudget::default();
+        let student = Uuid::new_v4();
+        for _ in 0..600 {
+            budget.charge(student).unwrap();
+        }
+        let error = budget.charge(student).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<SourceQuotaExceeded>()
+                .unwrap()
+                .retry_at
+                > chrono::Utc::now()
+        );
+        budget.charge(Uuid::new_v4()).unwrap();
+        budget.started -= std::time::Duration::from_secs(3601);
+        budget.charge(student).unwrap();
+        assert_eq!(budget.total, 1);
+        budget.total = 3600;
+        assert!(budget.charge(Uuid::new_v4()).is_err());
+    }
+
     #[tokio::test]
     async fn student_snapshot_rejects_large_trees_before_blobs_and_reuses_blobs() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -213,7 +285,10 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         for _ in 0..2 {
-            let snapshot = github.student_snapshot("course/repo", &sha).await.unwrap();
+            let snapshot = github
+                .student_snapshot(Uuid::nil(), "course/repo", &sha)
+                .await
+                .unwrap();
             assert_eq!(snapshot.files["src/b"].mode, "100755");
             assert_eq!(snapshot.files["src/a"].bytes().unwrap(), b"x");
         }
@@ -308,9 +383,24 @@ impl GitHub {
     }
 
     /// Conservative student budgets; trusted template/grader imports retain platform limits.
-    pub async fn student_snapshot(&self, repository: &str, sha: &str) -> Result<Snapshot> {
-        self.snapshot_with_limits(repository, sha, 512, 8 * 1024 * 1024)
-            .await
+    pub async fn student_snapshot(
+        &self,
+        student: Uuid,
+        repository: &str,
+        sha: &str,
+    ) -> Result<Snapshot> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            self.fetch_snapshot(repository, sha, 512, 8 * 1024 * 1024, Some(student)),
+        )
+        .await?
+    }
+
+    async fn charge_source(&self, student: Option<Uuid>) -> Result<()> {
+        if let Some(student) = student {
+            self.source_budget.lock().await.charge(student)?;
+        }
+        Ok(())
     }
 
     async fn snapshot_with_limits(
@@ -322,7 +412,7 @@ impl GitHub {
     ) -> Result<Snapshot> {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            self.fetch_snapshot(repository, sha, files, bytes),
+            self.fetch_snapshot(repository, sha, files, bytes, None),
         )
         .await?
     }
@@ -333,13 +423,16 @@ impl GitHub {
         sha: &str,
         max_files: usize,
         max_bytes: usize,
+        student: Option<Uuid>,
     ) -> Result<Snapshot> {
         ensure!(valid_hex(sha, 40), "invalid commit SHA");
         let path = repo_path(repository)?;
+        self.charge_source(student).await?;
         let commit: Commit = self
             .request(Method::GET, &format!("{path}/git/commits/{sha}"), None)
             .await?;
         ensure!(commit.sha == sha, "commit identity mismatch");
+        self.charge_source(student).await?;
         let tree: Tree = self
             .request(
                 Method::GET,
@@ -385,6 +478,7 @@ impl GitHub {
             let blob = if let Some(blob) = cached {
                 blob
             } else {
+                self.charge_source(student).await?;
                 let blob: ApiBlob = self
                     .request(
                         Method::GET,

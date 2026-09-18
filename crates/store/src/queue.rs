@@ -95,3 +95,10 @@ pub async fn retry(pool: &PgPool, task: Uuid, operator: &str, reason: &str) -> R
     tx.commit().await?;
     Ok(())
 }
+
+/// Waiting for an admission budget is not an infrastructure retry attempt.
+pub async fn defer(pool: &PgPool, task: &Task, until: DateTime<Utc>) -> Result<()> {
+    sqlx::query("UPDATE tasks SET status='pending',available_at=$3,attempts=GREATEST(attempts-1,0),last_error='source API budget deferred',updated_at=now() WHERE id=$1 AND lease_token=$2 AND status='leased' AND lease_until>now()")
+        .bind(task.id).bind(task.lease_token).bind(until).execute(pool).await?;
+    Ok(())
+}

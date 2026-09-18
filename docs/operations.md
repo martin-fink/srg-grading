@@ -235,3 +235,13 @@ A minute timer removes expired login/session records in batches of 1000. Account
 retain at most five sessions. Runtime database connections have 15-second statement,
 3-second lock, and 30-second idle-transaction timeouts; owner migration connections
 are exempt. Database/proxy listeners must remain inaccessible to students.
+
+The long-running control worker additionally caps actual student-source GitHub
+requests at 600 per enrollment and 3600 total per hour (cached blobs cost no API
+request). Budget exhaustion defers a task without spending its failure retry budget;
+newer receipts can still replace obsolete pending work. Limits are shared by the
+worker's concurrent loops, kept in bounded memory, and reset on service restart.
+Run one continuous control worker for this class; additional processes multiply
+these budgets. Final snapshots may wait for replenishment, but their receipt-time
+eligibility does not change. Provisioning/locking/publication do not consume this
+source budget.

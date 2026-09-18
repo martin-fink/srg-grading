@@ -66,6 +66,7 @@ pub struct Account {
 #[derive(Clone)]
 pub struct GitHub {
     pub(crate) http: Client,
+    pub(crate) source_budget: Arc<Mutex<crate::repository::SourceBudget>>,
     pub(crate) blobs: Arc<Mutex<std::collections::BTreeMap<String, grading_core::integrity::Blob>>>,
     config: Arc<AppConfig>,
     key: Arc<EncodingKey>,
@@ -163,6 +164,7 @@ impl GitHub {
             api_origin: "https://api.github.com".into(),
             rate_limit_until: Arc::new(Mutex::new(None)),
             blobs: Arc::new(Mutex::new(Default::default())),
+            source_budget: Arc::new(Mutex::new(Default::default())),
         })
     }
 
@@ -403,6 +405,7 @@ impl GitHub {
             api_origin,
             rate_limit_until: Arc::new(Mutex::new(None)),
             blobs: Arc::new(Mutex::new(Default::default())),
+            source_budget: Arc::new(Mutex::new(Default::default())),
         }
     }
 

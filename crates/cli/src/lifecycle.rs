@@ -122,7 +122,11 @@ async fn work_queue(context: &ContextData, once: bool, kinds: &[&str]) -> Result
                     let message = format!(
                         "stage={stage}; reason={reason}; upstream_status={upstream_status:?}"
                     );
-                    if error
+                    if let Some(quota) =
+                        error.downcast_ref::<grading_github::repository::SourceQuotaExceeded>()
+                    {
+                        queue::defer(&context.pool, &task, quota.retry_at).await?;
+                    } else if error
                         .downcast_ref::<grading_core::integrity::InvalidSubmission>()
                         .is_some()
                     {
@@ -304,7 +308,10 @@ async fn snapshot(context: &ContextData, id: Uuid) -> Result<()> {
                 repository.github_repo_id.context("missing repository ID")?,
             )
             .await?;
-        let source: Snapshot = context.github.student_snapshot(&full_name, &sha).await?;
+        let source: Snapshot = context
+            .github
+            .student_snapshot(repository.enrollment_id, &full_name, &sha)
+            .await?;
         let hash = context
             .artifacts
             .put(&context.pool, "source", &serde_json::to_vec(&source)?)

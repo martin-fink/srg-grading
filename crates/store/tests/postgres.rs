@@ -524,6 +524,29 @@ async fn database_invariants_and_recovery() -> Result<()> {
         .fetch_one(&pool)
         .await?;
     assert_eq!(status, "failed");
+    let mut tx = pool.begin().await?;
+    queue::enqueue(
+        &mut tx,
+        "snapshot",
+        json!({"submission_id":submission}),
+        "budget-fixture",
+        1000,
+    )
+    .await?;
+    tx.commit().await?;
+    let task = queue::lease(&pool, "budget-worker", &["snapshot"])
+        .await?
+        .unwrap();
+    let resume = Utc::now() + Duration::hours(1);
+    queue::defer(&pool, &task, resume).await?;
+    let (status, attempts, available): (String, i32, chrono::DateTime<Utc>) =
+        sqlx::query_as("SELECT status,attempts,available_at FROM tasks WHERE id=$1")
+            .bind(task.id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(status, "pending");
+    assert_eq!(attempts, 0);
+    assert!(available > Utc::now() + Duration::minutes(59));
     exercises::publication_rollout_and_permissions().await?;
     Ok(())
 }
