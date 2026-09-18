@@ -103,6 +103,22 @@ async fn run(args: Args) -> Result<()> {
             && public_url.fragment().is_none(),
         "public URL must be an HTTPS origin"
     );
+    let maintenance_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if grading_store::identity::cleanup_expired(&maintenance_pool)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    stage = "session_cleanup",
+                    "Expired authentication cleanup failed"
+                );
+            }
+        }
+    });
     let state = AppState {
         pool,
         github,

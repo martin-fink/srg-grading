@@ -27,6 +27,21 @@ async fn database_invariants_and_recovery() -> Result<()> {
     };
     let pool = PgPool::connect(&url).await?;
     let web = PgPool::connect(&std::env::var("TEST_WEB_DATABASE_URL")?).await?;
+    let credentials = tempfile::NamedTempFile::new()?;
+    tokio::fs::write(credentials.path(), std::env::var("TEST_WEB_DATABASE_URL")?).await?;
+    let bounded_pool = grading_store::connect(credentials.path()).await?;
+    for (setting, expected) in [
+        ("statement_timeout", "15s"),
+        ("lock_timeout", "3s"),
+        ("idle_in_transaction_session_timeout", "30s"),
+    ] {
+        let actual: String = sqlx::query_scalar("SELECT current_setting($1)")
+            .bind(setting)
+            .fetch_one(&bounded_pool)
+            .await?;
+        assert_eq!(actual, expected);
+    }
+    bounded_pool.close().await;
     let admin = PgPool::connect(&std::env::var("TEST_ADMIN_DATABASE_URL")?).await?;
     let operator = PgPool::connect(&std::env::var("TEST_OPERATOR_DATABASE_URL")?).await?;
     assert!(
@@ -93,6 +108,21 @@ async fn database_invariants_and_recovery() -> Result<()> {
         .await?;
     assert!(identity::session(&web, &rotated).await?.is_none());
 
+    for _ in 0..10 {
+        identity::new_session(&web, 101, "session-cap", None).await?;
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE github_id=101")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 5);
+    sqlx::query("UPDATE sessions SET expires_at=now()-interval '1 second' WHERE github_id=101")
+        .execute(&pool)
+        .await?;
+    identity::cleanup_expired(&web).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE github_id=101")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 0);
     let config = CourseConfig::parse(include_str!("../../../tests/fixtures/course.toml"))?;
     let mut assignment: grading_core::config::Assignment =
         toml::from_str(include_str!("../../../tests/fixtures/assignment.toml"))?;

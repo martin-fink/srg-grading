@@ -45,6 +45,11 @@ pub async fn connect(secret_file: &Path) -> Result<PgPool> {
     PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(5))
+        .after_connect(|connection, _| Box::pin(async move {
+            sqlx::query("SELECT set_config('statement_timeout','15000',false),set_config('lock_timeout','3000',false),set_config('idle_in_transaction_session_timeout','30000',false) WHERE current_user <> 'grading_owner'")
+                .execute(connection).await?;
+            Ok(())
+        }))
         .connect(url.trim())
         .await
         .context(grading_core::diagnostics::Stage("database_connect"))

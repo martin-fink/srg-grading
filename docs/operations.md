@@ -219,3 +219,19 @@ Grade CSVs now include `grade_state` and `provisional_points`. The `points` colu
 is populated only for closed, completed grades with required private grading done,
 or an explicit final override. Open assignments, pending private grading and failed
 runs cannot silently export provisional scores as final grades.
+
+## HTTP admission and authentication retention
+
+Each public web process admits at most 16 concurrent requests and 120 requests per
+second, with 20 login starts per minute. Its internal listener has four independent
+slots. Requests have a 30-second deadline. Overload returns 429/503 with Retry-After;
+these fixed-size limits cannot grow with attacker-supplied identities. Add per-client
+limits at the trusted reverse proxy, plus connection/body-read timeouts, so one
+anonymous client cannot monopolize the aggregate budget. Do not trust arbitrary
+forwarded client-IP headers. Account submission throttling is database-backed and
+shared across processes.
+
+A minute timer removes expired login/session records in batches of 1000. Accounts
+retain at most five sessions. Runtime database connections have 15-second statement,
+3-second lock, and 30-second idle-transaction timeouts; owner migration connections
+are exempt. Database/proxy listeners must remain inaccessible to students.

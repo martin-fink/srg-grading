@@ -150,6 +150,10 @@ pub fn public_router(state: AppState) -> Router {
         .route("/readyz", get(ready))
         .route("/static/style.css", get(css))
         .layer(DefaultBodyLimit::max(65536))
+        .layer(middleware::from_fn_with_state(
+            crate::limits::Limits::new(16),
+            crate::limits::admission,
+        ))
         .layer(middleware::from_fn(headers))
         .layer(middleware::from_fn(request_diagnostics))
         .with_state(state)
@@ -164,6 +168,10 @@ pub fn internal_router(state: AppState) -> Router {
         .route("/internal/tasks/{id}/result", post(result))
         .route("/internal/metrics", get(metrics))
         .layer(DefaultBodyLimit::max(8 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            crate::limits::Limits::new(4),
+            crate::limits::admission,
+        ))
         .layer(middleware::from_fn(request_diagnostics))
         .with_state(state)
 }

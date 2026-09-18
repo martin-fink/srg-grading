@@ -12,9 +12,6 @@ pub struct Session {
 }
 
 pub async fn begin_login(pool: &PgPool, state: &str, browser: &str, verifier: &str) -> Result<()> {
-    sqlx::query("DELETE FROM login_states WHERE expires_at<now()")
-        .execute(pool)
-        .await?;
     sqlx::query("INSERT INTO login_states(state_hash,browser_hash,verifier,expires_at) VALUES($1,$2,$3,now()+interval '5 minutes')")
         .bind(digest(state)).bind(digest(browser)).bind(verifier).execute(pool).await?;
     Ok(())
@@ -41,6 +38,9 @@ pub async fn new_session(
             .execute(&mut *tx)
             .await?;
     }
+    // The users upsert above serializes session creation for each account.
+    sqlx::query("DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE github_id=$1 ORDER BY expires_at DESC,token_hash OFFSET 4)")
+        .bind(github_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO sessions(token_hash,github_id,csrf,expires_at) VALUES($1,$2,$3,now()+interval '12 hours')")
         .bind(digest(&raw)).bind(github_id).bind(token()).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -103,5 +103,12 @@ pub async fn admin_change(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Bounded periodic maintenance, never performed on the anonymous login hot path.
+pub async fn cleanup_expired(pool: &PgPool) -> Result<()> {
+    sqlx::query("DELETE FROM login_states WHERE state_hash IN (SELECT state_hash FROM login_states WHERE expires_at<now() LIMIT 1000)").execute(pool).await?;
+    sqlx::query("DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE expires_at<now() LIMIT 1000)").execute(pool).await?;
     Ok(())
 }
